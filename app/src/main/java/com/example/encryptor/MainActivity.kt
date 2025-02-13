@@ -6,6 +6,7 @@ import android.content.Context
 import android.database.Cursor
 import android.os.Build
 import android.os.Bundle
+import android.provider.OpenableColumns
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Log
@@ -17,17 +18,23 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.material3.Button
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import androidx.documentfile.provider.DocumentFile
 import com.example.encryptor.ui.theme.EncryptorTheme
+import org.w3c.dom.Document
 import java.io.File
+import java.io.FileOutputStream
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
@@ -42,6 +49,10 @@ import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.IvParameterSpec
+import org.apache.commons.compress.archivers.tar.TarArchiveEntry
+import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream
+
+const val METADATA_FILENAME = ".encryptor"
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -58,55 +69,113 @@ class MainActivity : ComponentActivity() {
 fun Main() {
     val context = LocalContext.current
     val contentResolver = context.contentResolver
+    val selectedUri = remember { mutableStateOf<Uri?>(null) }
+
     val pickDocumentLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenDocument()
+        contract = ActivityResultContracts.OpenDocumentTree()
     ) { uri ->
         if (uri != null) {
-            val tmpFile = File.createTempFile("test", ".enc")
+            selectedUri.value = uri
+
+            /*val tmpFile = File.createTempFile("test", ".enc")
             val tmpOut = File.createTempFile("testOut", ".txt")
             CryptoManager().encryptFile(uri, context, "test2", tmpFile)
             CryptoManager().decryptFile(tmpFile, "test2", tmpOut)
-            println("TMPOUT CONTENTS ARE ${tmpOut.readText()}")
-
-            println("URI is $uri")
-            val cursor = contentResolver.query(uri, null, null, null, null)
-            displayQuery(cursor)
-            val file = uri.toFile(context)
-            if (file != null && file.exists()) {
-                println("File successfully created at: ${file.absolutePath}")
-                println("File size: ${file.length()} bytes")
-            } else {
-                println("File conversion failed!")
-            }
-            val content = file?.readBytes()
-            println("First few bytes: ${content?.take(10)}")
+            println("TMPOUT CONTENTS ARE ${tmpOut.readText()}")*/
         }
     }
 
     Column {
-        Spacer(modifier = Modifier.height(20.dp))
-        FilledTonalButton(
-            onClick = {
-                pickDocumentLauncher.launch(arrayOf("*/*"))
-            },
-            modifier = Modifier.height(40.dp)
-        ) {
-            Text("Pick a file")
+        Spacer(modifier = Modifier.height(40.dp))
+        Row {
+            FilledTonalButton(
+                onClick = {
+                    pickDocumentLauncher.launch(null)
+                },
+                modifier = Modifier.size(200.dp)
+            ) {
+                Text("Pick a file")
+            }
+            Spacer(modifier = Modifier.width(20.dp))
+
+            val text = "Selected folder:\n"
+            val dirName = getSelectedDirName(selectedUri.value, context) ?: "None"
+            Text(text + dirName)
         }
 
         Spacer(modifier = Modifier.height(40.dp))
 
         Row {
-            Button(onClick = { }, modifier = Modifier.height(40.dp)) {
+            Button(onClick = {encryptButton(selectedUri.value, context) }, modifier = Modifier.size(150.dp)) {
                 Text("Encrypt")
+
             }
             Spacer(modifier = Modifier.width(40.dp))
-            Button(onClick = { }, modifier = Modifier.height(40.dp)) {
+            Button(onClick = { }, modifier = Modifier.size(150.dp)) {
                 Text("Decrypt")
             }
         }
     }
 }
+
+fun getSelectedDirName(dirUri: Uri?, context: Context): String? {
+    return dirUri?.let { uri ->
+        return DocumentFile.fromTreeUri(context, uri)?.name ?: "Unknown"
+    }
+}
+
+fun encryptButton(dirUri: Uri?, context: Context){
+    if (dirUri == null) return
+    // TODO: Try extracting to see whether it actually works.
+    createTarFromUri(dirUri, context)
+}
+
+fun createTarFromUri(dirUri: Uri, context: Context) {
+    val rootDir = DocumentFile.fromTreeUri(context, dirUri) ?: return
+    val tarName = getSelectedDirName(dirUri, context)!!
+    val tarFile = File(context.filesDir, tarName)
+
+
+    TarArchiveOutputStream(FileOutputStream(tarFile)).use { tarOut ->
+        // TODO: make this global or smth, this is a hack.
+        val isFirstTimeEncryption = addDirectoryToTar(rootDir, "", tarOut, context)
+    }
+    context.filesDir.listFiles()?.forEach { file ->
+        println("INTERNAL STORAGE FILE: " + file.name)
+    }
+}
+
+fun addDirectoryToTar(
+    dir: DocumentFile,
+    base: String,
+    tarOut: TarArchiveOutputStream,
+    context: Context
+): Boolean {
+    var isFirstTimeEncryption = true
+    dir.listFiles().forEach { file ->
+        if (file.name == METADATA_FILENAME) {
+            isFirstTimeEncryption = false
+        }
+        val entryName = "$base${file.name}"
+        val entry = TarArchiveEntry(entryName)
+
+        if (file.isFile) {
+            context.contentResolver.openInputStream(file.uri)?.use {
+                entry.size = it.available().toLong()
+                tarOut.putArchiveEntry(entry)
+                it.copyTo(tarOut)
+                tarOut.closeArchiveEntry()
+            }
+        } else {
+            tarOut.putArchiveEntry(entry)
+            tarOut.closeArchiveEntry()
+            // Recursively add all other files
+            addDirectoryToTar(file, "$entryName/", tarOut, context)
+        }
+    }
+    return isFirstTimeEncryption
+}
+
 
 @Preview(showBackground = true)
 @Composable
@@ -238,10 +307,10 @@ class CryptoManager {
     }
 
     fun decryptFile(encryptedFile: File, keyAlias: String, outputFile: File): File {
-        val iv = ByteArray(12)
         DebugInputStream(encryptedFile.inputStream()).use { inputStream ->
 
             val ivSize = inputStream.read()
+            val iv = ByteArray(ivSize)
             var totalRead = 0
 
             while (totalRead < ivSize) {
