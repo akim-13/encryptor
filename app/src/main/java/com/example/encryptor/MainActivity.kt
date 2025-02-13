@@ -50,7 +50,10 @@ import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.IvParameterSpec
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry
+import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
 import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream
+import java.io.FileInputStream
+import java.util.UUID
 
 const val METADATA_FILENAME = ".encryptor"
 
@@ -125,24 +128,31 @@ fun getSelectedDirName(dirUri: Uri?, context: Context): String? {
 }
 
 fun encryptButton(dirUri: Uri?, context: Context){
-    if (dirUri == null) return
-    // TODO: Try extracting to see whether it actually works.
-    createTarFromUri(dirUri, context)
+    dirUri ?: return
+    val (tarFile, keyAlias) = createTarFromUri(dirUri, context) ?: return
+    val tarFileUri = Uri.fromFile(tarFile)
+    val tmpEncryptedTar = File.createTempFile(tarFile.name.replace(".tar", ""), ".tar.enc")
+    CryptoManager().encryptFile(tarFileUri, context, keyAlias, tmpEncryptedTar)
+
+    context.cacheDir.listFiles()?.forEach { file ->
+        println("INTERNAL STORAGE CONTENT:${file.name}")
+    }
 }
 
-fun createTarFromUri(dirUri: Uri, context: Context) {
-    val rootDir = DocumentFile.fromTreeUri(context, dirUri) ?: return
-    val tarName = getSelectedDirName(dirUri, context)!!
+fun createTarFromUri(dirUri: Uri, context: Context): Pair<File, String>? {
+    val rootDir = DocumentFile.fromTreeUri(context, dirUri) ?: return null
+    val tarName = getSelectedDirName(dirUri, context)!! + ".tar"
     val tarFile = File(context.filesDir, tarName)
 
-
+    var keyAlias = ""
     TarArchiveOutputStream(FileOutputStream(tarFile)).use { tarOut ->
         // TODO: make this global or smth, this is a hack.
-        val isFirstTimeEncryption = addDirectoryToTar(rootDir, "", tarOut, context)
+        keyAlias = addDirectoryToTar(rootDir, "", tarOut, context) ?: UUID.randomUUID().toString()
     }
-    context.filesDir.listFiles()?.forEach { file ->
-        println("INTERNAL STORAGE FILE: " + file.name)
-    }
+
+    if (keyAlias == "") throw Exception("This shouldn't have happened")
+
+    return Pair(tarFile, keyAlias)
 }
 
 fun addDirectoryToTar(
@@ -150,11 +160,13 @@ fun addDirectoryToTar(
     base: String,
     tarOut: TarArchiveOutputStream,
     context: Context
-): Boolean {
-    var isFirstTimeEncryption = true
+): String? {
+    var keyAlias: String? = null
     dir.listFiles().forEach { file ->
         if (file.name == METADATA_FILENAME) {
-            isFirstTimeEncryption = false
+            keyAlias = context.contentResolver.openInputStream(file.uri)?.use{ inputStream ->
+                inputStream.bufferedReader().use { it.readText() }
+            }
         }
         val entryName = "$base${file.name}"
         val entry = TarArchiveEntry(entryName)
@@ -173,9 +185,8 @@ fun addDirectoryToTar(
             addDirectoryToTar(file, "$entryName/", tarOut, context)
         }
     }
-    return isFirstTimeEncryption
+    return keyAlias
 }
-
 
 @Preview(showBackground = true)
 @Composable
@@ -278,16 +289,6 @@ class CryptoManager {
 
 
     fun encryptFile(uri: Uri, context: Context, keyAlias: String, outputFile: File): File {
-        /* // That's for later to deal with SAF
-        val cursor = contentResolver.query(uri, arrayOf(android.provider.MediaStore.MediaColumns.DISPLAY_NAME), null, null, null)
-        val outputFilename = cursor?.use {
-            if (it.moveToFirst()) {
-                it.getString(0) + ".enc"
-            } else {
-                throw IOException("Failed to determine output file name because something is wrong with input file or access to it.")
-            }
-        }
-        */
         val contentResolver = context.contentResolver
         val inputStream = contentResolver.openInputStream(uri) ?: throw IOException("Failed to open input stream")
         val cipher = initCipher("ENCRYPT", keyAlias)
