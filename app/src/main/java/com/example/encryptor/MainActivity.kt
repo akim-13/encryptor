@@ -4,9 +4,7 @@ import android.net.Uri
 import androidx.activity.result.contract.ActivityResultContracts
 import android.content.Context
 import android.database.Cursor
-import android.os.Build
 import android.os.Bundle
-import android.provider.OpenableColumns
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Log
@@ -32,7 +30,6 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.documentfile.provider.DocumentFile
 import com.example.encryptor.ui.theme.EncryptorTheme
-import org.w3c.dom.Document
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
@@ -40,20 +37,18 @@ import java.io.InputStream
 import java.io.OutputStream
 import java.security.KeyStore
 import java.security.KeyStoreException
-import java.security.NoSuchAlgorithmException
-import java.security.UnrecoverableKeyException
 import javax.crypto.Cipher
 import javax.crypto.CipherInputStream
 import javax.crypto.CipherOutputStream
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
-import javax.crypto.spec.IvParameterSpec
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry
-import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
 import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream
 import java.io.FileInputStream
+import java.io.RandomAccessFile
 import java.util.UUID
+import kotlin.experimental.xor
 
 const val METADATA_FILENAME = ".encryptor"
 
@@ -129,17 +124,48 @@ fun getSelectedDirName(dirUri: Uri?, context: Context): String? {
 
 fun encryptButton(dirUri: Uri?, context: Context){
     dirUri ?: return
-    val (tarFile, keyAlias) = createTarFromUri(dirUri, context) ?: return
+    val (tarFile, keyAlias) = createTarAndGetKeyAlias(dirUri, context) ?: return
     val tarFileUri = Uri.fromFile(tarFile)
-    val tmpEncryptedTar = File.createTempFile(tarFile.name.replace(".tar", ""), ".tar.enc")
-    CryptoManager().encryptFile(tarFileUri, context, keyAlias, tmpEncryptedTar)
+    val encryptedTarFile = File(context.cacheDir, "${tarFile.name}.enc")
+    if (encryptedTarFile.exists()) {
+        encryptedTarFile.delete()
+    }
+    encryptedTarFile.createNewFile()
 
-    context.cacheDir.listFiles()?.forEach { file ->
+    val cryptoManager = CryptoManager()
+    cryptoManager.encryptFile(tarFileUri, context, keyAlias, encryptedTarFile)
+
+    if (cryptoManager.isIntegrityCheckPassed(encryptedTarFile, keyAlias)) {
+        deleteAllFilesInDirUri(dirUri, context)
+        copyFileToDir(encryptedTarFile, dirUri, context)
+    } else {
+        // Notify the user that everything has been canceled, no operation performed.
+    }
+
+    context.filesDir.listFiles()?.forEach { file ->
         println("INTERNAL STORAGE CONTENT:${file.name}")
     }
 }
 
-fun createTarFromUri(dirUri: Uri, context: Context): Pair<File, String>? {
+fun deleteAllFilesInDirUri(dirUri: Uri, context: Context) {
+    val dir = DocumentFile.fromTreeUri(context, dirUri)
+    dir?.listFiles()?.forEach { file ->
+        file.delete()
+    }
+}
+
+fun copyFileToDir(fileToCopy: File, destDirUri: Uri, context: Context) {
+    val destinationDir = DocumentFile.fromTreeUri(context, destDirUri)
+    val destinationFile = destinationDir?.createFile("application/octet-stream", fileToCopy.name) ?: return
+
+    context.contentResolver.openOutputStream(destinationFile.uri)?.use { outputStream ->
+        fileToCopy.inputStream().use { inputStream ->
+            inputStream.copyTo(outputStream)
+        }
+    }
+}
+
+fun createTarAndGetKeyAlias(dirUri: Uri, context: Context): Pair<File, String>? {
     val rootDir = DocumentFile.fromTreeUri(context, dirUri) ?: return null
     val tarName = getSelectedDirName(dirUri, context)!! + ".tar"
     val tarFile = File(context.filesDir, tarName)
@@ -147,7 +173,7 @@ fun createTarFromUri(dirUri: Uri, context: Context): Pair<File, String>? {
     var keyAlias = ""
     TarArchiveOutputStream(FileOutputStream(tarFile)).use { tarOut ->
         // TODO: make this global or smth, this is a hack.
-        keyAlias = addDirectoryToTar(rootDir, "", tarOut, context) ?: UUID.randomUUID().toString()
+        keyAlias = addDirToTarAndGetKeyAlias(rootDir, "", tarOut, context) ?: UUID.randomUUID().toString()
     }
 
     if (keyAlias == "") throw Exception("This shouldn't have happened")
@@ -155,7 +181,7 @@ fun createTarFromUri(dirUri: Uri, context: Context): Pair<File, String>? {
     return Pair(tarFile, keyAlias)
 }
 
-fun addDirectoryToTar(
+fun addDirToTarAndGetKeyAlias(
     dir: DocumentFile,
     base: String,
     tarOut: TarArchiveOutputStream,
@@ -182,7 +208,7 @@ fun addDirectoryToTar(
             tarOut.putArchiveEntry(entry)
             tarOut.closeArchiveEntry()
             // Recursively add all other files
-            addDirectoryToTar(file, "$entryName/", tarOut, context)
+            addDirToTarAndGetKeyAlias(file, "$entryName/", tarOut, context)
         }
     }
     return keyAlias
@@ -243,15 +269,15 @@ class CryptoManager {
         val cipherInstance = Cipher.getInstance(TRANSFORMATION)
 
         return if (mode == "ENCRYPT") {
-            cipherInstance.apply{ init(Cipher.ENCRYPT_MODE, getKey(keyAlias)) }
+            cipherInstance.apply{ init(Cipher.ENCRYPT_MODE, retrieveOrCreateKey(keyAlias)) }
         } else if (mode == "DECRYPT" && iv != null) {
-            cipherInstance.apply{ init(Cipher.DECRYPT_MODE, getKey(keyAlias), GCMParameterSpec(128, iv)) }
+            cipherInstance.apply{ init(Cipher.DECRYPT_MODE, retrieveOrCreateKey(keyAlias), GCMParameterSpec(128, iv)) }
         } else {
             throw Exception("C'mon, just choose the right mode and iv if necessary")
         }
     }
 
-    private fun getKey(keyAlias: String): SecretKey {
+    private fun retrieveOrCreateKey(keyAlias: String): SecretKey {
         try {
             val entry = keyStore.getEntry(keyAlias, null) as? KeyStore.SecretKeyEntry
 
@@ -287,17 +313,16 @@ class CryptoManager {
         return keyGenerator.generateKey()
     }
 
-
     fun encryptFile(uri: Uri, context: Context, keyAlias: String, outputFile: File): File {
         val contentResolver = context.contentResolver
-        val inputStream = contentResolver.openInputStream(uri) ?: throw IOException("Failed to open input stream")
+        val fileInputStream = contentResolver.openInputStream(uri) ?: throw IOException("Failed to open input stream")
         val cipher = initCipher("ENCRYPT", keyAlias)
 
-        DebugOutputStream(outputFile.outputStream()).use { rawOutputStream ->
-            rawOutputStream.write(cipher.iv.size)
-            rawOutputStream.write(cipher.iv)
-            CipherOutputStream(rawOutputStream, cipher).use { encryptedOutputStream ->
-                inputStream.use { input ->
+        outputFile.outputStream().use { unencryptedOutputStream ->
+            unencryptedOutputStream.write(cipher.iv.size)
+            unencryptedOutputStream.write(cipher.iv)
+            CipherOutputStream(unencryptedOutputStream, cipher).use { encryptedOutputStream ->
+                fileInputStream.use { input ->
                     // WARNING: Overflows if iv.size > 255. Modern iv size is up
                     // to 24 bytes, so might only become an issue in the future.
                     input.copyTo(encryptedOutputStream)
@@ -307,29 +332,57 @@ class CryptoManager {
         return outputFile
     }
 
+    private fun extractIvFromInputStream(inputStream: FileInputStream): ByteArray {
+        val ivSize = inputStream.read()
+        val iv = ByteArray(ivSize)
+        var totalRead = 0
+
+        while (totalRead < ivSize) {
+            val bytesRead = inputStream.read(iv, totalRead, ivSize - totalRead)
+            if (bytesRead == -1) throw IOException("Unexpected EOF while reading IV")
+            totalRead += bytesRead
+        }
+
+        return iv
+    }
+
     fun decryptFile(encryptedFile: File, keyAlias: String, outputFile: File): File {
-        DebugInputStream(encryptedFile.inputStream()).use { inputStream ->
-
-            val ivSize = inputStream.read()
-            val iv = ByteArray(ivSize)
-            var totalRead = 0
-
-            while (totalRead < ivSize) {
-                val bytesRead = inputStream.read(iv, totalRead, ivSize - totalRead)
-                if (bytesRead == -1) throw IOException("Unexpected EOF while reading IV")
-                totalRead += bytesRead
-            }
-
+        encryptedFile.inputStream().use { encryptedInputStream ->
+            val iv = extractIvFromInputStream(encryptedInputStream)
             val cipher = initCipher("DECRYPT", keyAlias, iv)
 
-            CipherInputStream(inputStream, cipher).use { encryptedInputStream ->
+            CipherInputStream(encryptedInputStream, cipher).use { decryptedInputStream ->
                 outputFile.outputStream().use { outputStream ->
-                    encryptedInputStream.copyTo(outputStream)
+                    decryptedInputStream.copyTo(outputStream)
                 }
             }
         }
         return outputFile
     }
+
+    fun isIntegrityCheckPassed(encryptedFile: File, keyAlias: String): Boolean {
+        try {
+            FileInputStream(encryptedFile).use { encryptedInputStream ->
+                val iv = extractIvFromInputStream(encryptedInputStream)
+                val cipher = initCipher("DECRYPT", keyAlias, iv)
+
+                CipherInputStream(encryptedInputStream, cipher).use { decryptedInputStream ->
+                    // Reduces the number of IO calls, making it faster.
+                    val buffer = ByteArray(4096)
+                    while (decryptedInputStream.read(buffer) != -1) {
+                        // Just read through the file to force decryption/authentication
+                    }
+                }
+            }
+            return true
+        } catch (e: Exception) {
+            Log.e("IntegrityCheck", "ERROR: Unexpected failure during integrity verification")
+            Log.e("IntegrityCheck", e.toString())
+        }
+
+        return false
+    }
+
 }
 
 class ErrorRetrievingKeyException(message: String, cause: Throwable? = null) : Exception(message, cause)
