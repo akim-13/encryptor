@@ -5,8 +5,6 @@ import androidx.activity.result.contract.ActivityResultContracts
 import android.content.Context
 import android.database.Cursor
 import android.os.Bundle
-import android.security.keystore.KeyGenParameterSpec
-import android.security.keystore.KeyProperties
 import android.util.Log
 import android.webkit.MimeTypeMap
 import androidx.activity.ComponentActivity
@@ -32,23 +30,13 @@ import androidx.documentfile.provider.DocumentFile
 import com.example.encryptor.ui.theme.EncryptorTheme
 import java.io.File
 import java.io.FileOutputStream
+import org.apache.commons.compress.archivers.tar.TarArchiveEntry
+import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream
+import java.io.Closeable
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
-import java.security.KeyStore
-import java.security.KeyStoreException
-import javax.crypto.Cipher
-import javax.crypto.CipherInputStream
-import javax.crypto.CipherOutputStream
-import javax.crypto.KeyGenerator
-import javax.crypto.SecretKey
-import javax.crypto.spec.GCMParameterSpec
-import org.apache.commons.compress.archivers.tar.TarArchiveEntry
-import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream
-import java.io.FileInputStream
-import java.io.RandomAccessFile
 import java.util.UUID
-import kotlin.experimental.xor
 
 const val METADATA_FILENAME = ".encryptor"
 
@@ -71,17 +59,7 @@ fun Main() {
 
     val pickDocumentLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocumentTree()
-    ) { uri ->
-        if (uri != null) {
-            selectedUri.value = uri
-
-            /*val tmpFile = File.createTempFile("test", ".enc")
-            val tmpOut = File.createTempFile("testOut", ".txt")
-            CryptoManager().encryptFile(uri, context, "test2", tmpFile)
-            CryptoManager().decryptFile(tmpFile, "test2", tmpOut)
-            println("TMPOUT CONTENTS ARE ${tmpOut.readText()}")*/
-        }
-    }
+    ) { uri -> uri?.let { selectedUri.value = uri } }
 
     Column {
         Spacer(modifier = Modifier.height(40.dp))
@@ -104,25 +82,109 @@ fun Main() {
         Spacer(modifier = Modifier.height(40.dp))
 
         Row {
-            Button(onClick = {encryptButton(selectedUri.value, context) }, modifier = Modifier.size(150.dp)) {
+            Button(
+                onClick = { encryptButtonHandler(selectedUri.value, context) },
+                modifier = Modifier.size(150.dp)
+            ) {
                 Text("Encrypt")
 
             }
             Spacer(modifier = Modifier.width(40.dp))
-            Button(onClick = { }, modifier = Modifier.size(150.dp)) {
+            Button(
+                onClick = {decryptButtonHandler(selectedUri.value, context)},
+                modifier = Modifier.size(150.dp)
+            ) {
                 Text("Decrypt")
             }
         }
     }
 }
 
-fun getSelectedDirName(dirUri: Uri?, context: Context): String? {
-    return dirUri?.let { uri ->
-        return DocumentFile.fromTreeUri(context, uri)?.name ?: "Unknown"
+fun decryptButtonHandler(dirUri: Uri?, context: Context) {
+    dirUri ?: return
+    val dir = DocumentFile.fromTreeUri(context, dirUri)
+    val encryptedDocumentFile: DocumentFile? =
+        dir?.listFiles()?.singleOrNull { it.name?.endsWith(".tar.enc") == true }
+
+    if (encryptedDocumentFile == null) {
+        // TODO: Notify the user the directory isn't encrypted/is invalid.
+        return
+    }
+
+    val originalTarName = encryptedDocumentFile.name?.removeSuffix(".enc") ?: "decrypted.tar"
+    // TODO: Notify the user.
+    val decryptedTarDocumentFile = dir.createFile("application/x-tar", originalTarName)
+    if (decryptedTarDocumentFile == null) {
+        Log.e("FileError", "Failed to create decrypted file: $originalTarName")
+        return
+    }
+    val cryptoManager = CryptoManager()
+
+    val isDecryptionSuccessful = useIOStreams(
+        encryptedDocumentFile.uri, decryptedTarDocumentFile.uri, context
+    ) { encryptedInputStream, decryptedOutputStream ->
+        // FIXME: Extract key alias from encrypted tar header.
+        val keyAlias = ""
+        cryptoManager.decryptFile(encryptedInputStream, keyAlias, decryptedOutputStream)
+    } ?: false
+
+    if (!isDecryptionSuccessful) {
+        // TODO: Notify the user.
+        println("Faaaaaaaaaaaaaaaaaaaaaaaaaaaaaail")
+        if (!decryptedTarDocumentFile.delete()) {
+            Log.e("FileError", "Failed to delete ${decryptedTarDocumentFile.name}")
+        }
+        return
     }
 }
 
-fun encryptButton(dirUri: Uri?, context: Context){
+// <R> defines a generic type parameter.
+fun <R> useIOStreams(
+    inputUri: Uri,
+    outputUri: Uri,
+    context: Context,
+    block: (InputStream, OutputStream) -> R // Defines a lambda inside { I, O -> R }.
+): R? {
+    val contentResolver = context.contentResolver
+
+    fun openStream(uri: Uri, isInput: Boolean): Closeable? {
+        return try {
+            if (isInput) contentResolver.openInputStream(uri)
+            else contentResolver.openOutputStream(uri)
+        } catch (e: Exception) {
+            val stream = if (isInput) "InputStream" else "OutputStream"
+            Log.e("IOStreamError", "Exception while opening $stream for URI: \"$uri\"", e)
+            null
+        }
+    }
+
+    val inputStream = openStream(inputUri, true) as? InputStream
+    val outputStream = openStream(outputUri, false) as? OutputStream
+
+    if (inputStream == null || outputStream == null) {
+        try {
+            inputStream?.close()
+            outputStream?.close()
+        } catch (e: Exception) {
+            Log.e("IOStreamError", "Failed to close stream", e)
+        }
+        return null
+    }
+
+    return try {
+        inputStream.use { inStream ->
+            outputStream.use { outStream ->
+                block(inStream, outStream) // Execute the lambda inside { I, O -> R }.
+            }
+        }
+    } catch (e: Exception) {
+        Log.e("IOStreamError", "Error during IO operations", e)
+        null
+    }
+}
+
+
+fun encryptButtonHandler(dirUri: Uri?, context: Context){
     dirUri ?: return
     val (tarFile, keyAlias) = createTarAndGetKeyAlias(dirUri, context) ?: return
     val tarFileUri = Uri.fromFile(tarFile)
@@ -139,11 +201,17 @@ fun encryptButton(dirUri: Uri?, context: Context){
         deleteAllFilesInDirUri(dirUri, context)
         copyFileToDir(encryptedTarFile, dirUri, context)
     } else {
-        // Notify the user that everything has been canceled, no operation performed.
+        // TODO: Let the user know that nothing has been encrypted or changed.
     }
 
     context.filesDir.listFiles()?.forEach { file ->
         println("INTERNAL STORAGE CONTENT:${file.name}")
+    }
+}
+
+fun getSelectedDirName(dirUri: Uri?, context: Context): String? {
+    return dirUri?.let { uri ->
+        return DocumentFile.fromTreeUri(context, uri)?.name ?: "Unknown"
     }
 }
 
@@ -252,165 +320,3 @@ fun Uri.toFile(context: Context): File? {
     }
 }
 
-class CryptoManager {
-    // Static properties, pertain to the class rather than its instances.
-    companion object {
-        private const val ALGORITHM = KeyProperties.KEY_ALGORITHM_AES
-        private const val BLOCK_MODE = KeyProperties.BLOCK_MODE_GCM
-        private const val PADDING = KeyProperties.ENCRYPTION_PADDING_NONE
-        private const val TRANSFORMATION = "$ALGORITHM/$BLOCK_MODE/$PADDING"
-    }
-
-    private val keyStore = KeyStore.getInstance("AndroidKeyStore").apply {
-        load(null)
-    }
-
-    private fun initCipher(mode: String, keyAlias: String, iv: ByteArray? = null): Cipher {
-        val cipherInstance = Cipher.getInstance(TRANSFORMATION)
-
-        return if (mode == "ENCRYPT") {
-            cipherInstance.apply{ init(Cipher.ENCRYPT_MODE, retrieveOrCreateKey(keyAlias)) }
-        } else if (mode == "DECRYPT" && iv != null) {
-            cipherInstance.apply{ init(Cipher.DECRYPT_MODE, retrieveOrCreateKey(keyAlias), GCMParameterSpec(128, iv)) }
-        } else {
-            throw Exception("C'mon, just choose the right mode and iv if necessary")
-        }
-    }
-
-    private fun retrieveOrCreateKey(keyAlias: String): SecretKey {
-        try {
-            val entry = keyStore.getEntry(keyAlias, null) as? KeyStore.SecretKeyEntry
-
-            return if (entry != null) {
-                entry.secretKey
-            } else {
-                createKey(keyAlias)
-            }
-
-        } catch (e: KeyStoreException) {
-            // If the key is invalid (e.g., locked due to authentication), delete it.
-            keyStore.deleteEntry(keyAlias)
-            return createKey(keyAlias)
-        } catch (e: Exception) {
-            throw ErrorRetrievingKeyException("Error retrieving key: \"$keyAlias\"", e)
-        }
-    }
-
-    private fun createKey(keyAlias: String): SecretKey {
-        val keyGenerator = KeyGenerator.getInstance(ALGORITHM, "AndroidKeyStore")
-
-        keyGenerator.init(
-            KeyGenParameterSpec.Builder(
-                keyAlias,
-                KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
-            )
-                .setBlockModes(BLOCK_MODE)
-                .setEncryptionPaddings(PADDING)
-                .setUserAuthenticationRequired(false)
-                .build()
-        )
-
-        return keyGenerator.generateKey()
-    }
-
-    fun encryptFile(uri: Uri, context: Context, keyAlias: String, outputFile: File): File {
-        val contentResolver = context.contentResolver
-        val fileInputStream = contentResolver.openInputStream(uri) ?: throw IOException("Failed to open input stream")
-        val cipher = initCipher("ENCRYPT", keyAlias)
-
-        outputFile.outputStream().use { unencryptedOutputStream ->
-            unencryptedOutputStream.write(cipher.iv.size)
-            unencryptedOutputStream.write(cipher.iv)
-            CipherOutputStream(unencryptedOutputStream, cipher).use { encryptedOutputStream ->
-                fileInputStream.use { input ->
-                    // WARNING: Overflows if iv.size > 255. Modern iv size is up
-                    // to 24 bytes, so might only become an issue in the future.
-                    input.copyTo(encryptedOutputStream)
-                }
-            }
-        }
-        return outputFile
-    }
-
-    private fun extractIvFromInputStream(inputStream: FileInputStream): ByteArray {
-        val ivSize = inputStream.read()
-        val iv = ByteArray(ivSize)
-        var totalRead = 0
-
-        while (totalRead < ivSize) {
-            val bytesRead = inputStream.read(iv, totalRead, ivSize - totalRead)
-            if (bytesRead == -1) throw IOException("Unexpected EOF while reading IV")
-            totalRead += bytesRead
-        }
-
-        return iv
-    }
-
-    fun decryptFile(encryptedFile: File, keyAlias: String, outputFile: File): File {
-        encryptedFile.inputStream().use { encryptedInputStream ->
-            val iv = extractIvFromInputStream(encryptedInputStream)
-            val cipher = initCipher("DECRYPT", keyAlias, iv)
-
-            CipherInputStream(encryptedInputStream, cipher).use { decryptedInputStream ->
-                outputFile.outputStream().use { outputStream ->
-                    decryptedInputStream.copyTo(outputStream)
-                }
-            }
-        }
-        return outputFile
-    }
-
-    fun isIntegrityCheckPassed(encryptedFile: File, keyAlias: String): Boolean {
-        try {
-            FileInputStream(encryptedFile).use { encryptedInputStream ->
-                val iv = extractIvFromInputStream(encryptedInputStream)
-                val cipher = initCipher("DECRYPT", keyAlias, iv)
-
-                CipherInputStream(encryptedInputStream, cipher).use { decryptedInputStream ->
-                    // Reduces the number of IO calls, making it faster.
-                    val buffer = ByteArray(4096)
-                    while (decryptedInputStream.read(buffer) != -1) {
-                        // Just read through the file to force decryption/authentication
-                    }
-                }
-            }
-            return true
-        } catch (e: Exception) {
-            Log.e("IntegrityCheck", "ERROR: Unexpected failure during integrity verification")
-            Log.e("IntegrityCheck", e.toString())
-        }
-
-        return false
-    }
-
-}
-
-class ErrorRetrievingKeyException(message: String, cause: Throwable? = null) : Exception(message, cause)
-
-class DebugOutputStream(private val wrapped: OutputStream) : OutputStream() {
-    override fun write(b: Int) {
-        Log.d("DEBUG", "Write 1 byte: $b") // Now logs correct values (0-255)
-        wrapped.write(b)
-    }
-}
-
-class DebugInputStream(private val wrapped: InputStream) : InputStream() {
-    override fun read(): Int {
-        val result = wrapped.read()
-        Log.d("DEBUG", "Read 1 byte: $result") // Log in decimal
-        return result
-    }
-
-    override fun read(b: ByteArray, off: Int, len: Int): Int {
-        val result = wrapped.read(b, off, len)
-        if (result > 0) {
-            Log.d("DEBUG", "Read $result bytes: ${b.copyOfRange(off, off + result).joinToString(" ")}") // Decimal format
-        }
-        return result
-    }
-
-    override fun close() {
-        Log.d("DEBUG", "Closing input stream")
-        wrapped.close()
-    }
-}
