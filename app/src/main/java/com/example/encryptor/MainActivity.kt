@@ -19,13 +19,18 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.material3.Button
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextField
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import androidx.core.content.FileProvider
 import androidx.documentfile.provider.DocumentFile
 import com.example.encryptor.ui.theme.EncryptorTheme
 import java.io.File
@@ -33,7 +38,6 @@ import java.io.FileOutputStream
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry
 import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream
 import java.io.Closeable
-import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
 import java.util.UUID
@@ -83,7 +87,14 @@ fun Main() {
 
         Row {
             Button(
-                onClick = { encryptButtonHandler(selectedUri.value, context) },
+                onClick = {
+                    try {
+                        encryptButtonHandler(selectedUri.value, context)
+                    } catch (e: Exception) {
+                        // TODO: Inform the user.
+                        Log.e("UnexpectedError", "An unexpected error occurred", e)
+                    }
+                          },
                 modifier = Modifier.size(150.dp)
             ) {
                 Text("Encrypt")
@@ -91,13 +102,31 @@ fun Main() {
             }
             Spacer(modifier = Modifier.width(40.dp))
             Button(
-                onClick = {decryptButtonHandler(selectedUri.value, context)},
+                onClick = {
+                    try {
+                        decryptButtonHandler(selectedUri.value, context)
+                    } catch (e: Exception) {
+                        // TODO: Inform the user.
+                        Log.e("UnexpectedError", "An unexpected error occurred", e)
+                    }
+                          },
                 modifier = Modifier.size(150.dp)
             ) {
                 Text("Decrypt")
             }
         }
+
+        Spacer(modifier = Modifier.height(40.dp))
+
+        var password by remember { mutableStateOf("") }
+        TextField(
+            value = password,
+            onValueChange = { password = it },
+            label = { Text("Password") },
+            visualTransformation = PasswordVisualTransformation()
+        )
     }
+
 }
 
 fun decryptButtonHandler(dirUri: Uri?, context: Context) {
@@ -124,8 +153,9 @@ fun decryptButtonHandler(dirUri: Uri?, context: Context) {
         encryptedDocumentFile.uri, decryptedTarDocumentFile.uri, context
     ) { encryptedInputStream, decryptedOutputStream ->
         // FIXME: Extract key alias from encrypted tar header.
+        val iv = cryptoManager.extractIvFromInputStream(encryptedInputStream)
         val keyAlias = ""
-        cryptoManager.decryptFile(encryptedInputStream, keyAlias, decryptedOutputStream)
+        cryptoManager.decryptStream(encryptedInputStream, iv, keyAlias, decryptedOutputStream)
     } ?: false
 
     if (!isDecryptionSuccessful) {
@@ -187,7 +217,6 @@ fun <R> useIOStreams(
 fun encryptButtonHandler(dirUri: Uri?, context: Context){
     dirUri ?: return
     val (tarFile, keyAlias) = createTarAndGetKeyAlias(dirUri, context) ?: return
-    val tarFileUri = Uri.fromFile(tarFile)
     val encryptedTarFile = File(context.cacheDir, "${tarFile.name}.enc")
     if (encryptedTarFile.exists()) {
         encryptedTarFile.delete()
@@ -195,17 +224,25 @@ fun encryptButtonHandler(dirUri: Uri?, context: Context){
     encryptedTarFile.createNewFile()
 
     val cryptoManager = CryptoManager()
-    cryptoManager.encryptFile(tarFileUri, context, keyAlias, encryptedTarFile)
+    val encryptedTarFileUri = Uri.fromFile(encryptedTarFile)
+    val tarFileUri = Uri.fromFile(tarFile)
+
+    val isEncryptionSuccessful = useIOStreams(
+        tarFileUri, encryptedTarFileUri, context
+    ) { unencryptedInputStream, unencryptedOutputStream ->
+        cryptoManager.encryptStream(unencryptedInputStream, keyAlias, unencryptedOutputStream)
+    } ?: false
+
+    if (!isEncryptionSuccessful) {
+        // TODO: Let the user know that nothing has been encrypted or changed.
+        return
+    }
 
     if (cryptoManager.isIntegrityCheckPassed(encryptedTarFile, keyAlias)) {
         deleteAllFilesInDirUri(dirUri, context)
         copyFileToDir(encryptedTarFile, dirUri, context)
     } else {
         // TODO: Let the user know that nothing has been encrypted or changed.
-    }
-
-    context.filesDir.listFiles()?.forEach { file ->
-        println("INTERNAL STORAGE CONTENT:${file.name}")
     }
 }
 

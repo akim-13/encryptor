@@ -80,27 +80,7 @@ class CryptoManager {
         return keyGenerator.generateKey()
     }
 
-    // TODO: Refactor in the same way as decryptFile().
-    fun encryptFile(uri: Uri, context: Context, keyAlias: String, outputFile: File): File {
-        val contentResolver = context.contentResolver
-        val fileInputStream = contentResolver.openInputStream(uri) ?: throw IOException("Failed to open input stream")
-        val cipher = initCipher("ENCRYPT", keyAlias)
-
-        outputFile.outputStream().use { unencryptedOutputStream ->
-            unencryptedOutputStream.write(cipher.iv.size)
-            unencryptedOutputStream.write(cipher.iv)
-            CipherOutputStream(unencryptedOutputStream, cipher).use { encryptedOutputStream ->
-                fileInputStream.use { input ->
-                    // WARNING: Overflows if iv.size > 255. Modern iv size is up
-                    // to 24 bytes, so might only become an issue in the future.
-                    input.copyTo(encryptedOutputStream)
-                }
-            }
-        }
-        return outputFile
-    }
-
-    private fun extractIvFromInputStream(inputStream: InputStream): ByteArray {
+    fun extractIvFromInputStream(inputStream: InputStream): ByteArray {
         val ivSize = inputStream.read()
         val iv = ByteArray(ivSize)
         var totalRead = 0
@@ -114,13 +94,37 @@ class CryptoManager {
         return iv
     }
 
-    fun decryptFile(
+    fun encryptStream(
+        unencryptedInputStream: InputStream,
+        keyAlias: String,
+        unencryptedOutputStream: OutputStream
+    ): Boolean {
+        return try {
+            val cipher = initCipher("ENCRYPT", keyAlias)
+
+            // Create a header.
+            unencryptedOutputStream.write(cipher.iv.size)
+            unencryptedOutputStream.write(cipher.iv)
+
+            CipherOutputStream(unencryptedOutputStream, cipher).use { encryptedOutputStream ->
+                // WARNING: Overflows if iv.size > 255. Modern iv size is up
+                // to 24 bytes, so might only become an issue in the future.
+                unencryptedInputStream.copyTo(encryptedOutputStream)
+            }
+            true
+        } catch (e: Exception) {
+            Log.e("EncryptionError", "Encryption failed (key: \"${keyAlias}\")", e)
+            false
+        }
+    }
+
+    fun decryptStream(
         encryptedInputStream: InputStream,
+        iv: ByteArray,
         keyAlias: String,
         decryptedOutputStream: OutputStream
     ): Boolean {
         return try {
-            val iv = extractIvFromInputStream(encryptedInputStream)
             val cipher = initCipher("DECRYPT", keyAlias, iv)
 
             CipherInputStream(encryptedInputStream, cipher).use { decryptedInputStream ->
