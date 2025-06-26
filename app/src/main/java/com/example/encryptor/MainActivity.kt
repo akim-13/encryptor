@@ -59,6 +59,7 @@ class MainActivity : ComponentActivity() {
 fun Main() {
     val context = LocalContext.current
     val contentResolver = context.contentResolver
+    var password by remember { mutableStateOf("") }
     val selectedUri = remember { mutableStateOf<Uri?>(null) }
 
     val pickDocumentLauncher = rememberLauncherForActivityResult(
@@ -89,7 +90,7 @@ fun Main() {
             Button(
                 onClick = {
                     try {
-                        encryptButtonHandler(selectedUri.value, context)
+                        encryptButtonHandler(selectedUri.value, password, context)
                     } catch (e: Exception) {
                         // TODO: Inform the user.
                         Log.e("UnexpectedError", "An unexpected error occurred", e)
@@ -118,7 +119,6 @@ fun Main() {
 
         Spacer(modifier = Modifier.height(40.dp))
 
-        var password by remember { mutableStateOf("") }
         TextField(
             value = password,
             onValueChange = { password = it },
@@ -141,9 +141,9 @@ fun decryptButtonHandler(dirUri: Uri?, context: Context) {
     }
 
     val originalTarName = encryptedDocumentFile.name?.removeSuffix(".enc") ?: "decrypted.tar"
-    // TODO: Notify the user.
     val decryptedTarDocumentFile = dir.createFile("application/x-tar", originalTarName)
     if (decryptedTarDocumentFile == null) {
+        // TODO: Notify the user.
         Log.e("FileError", "Failed to create decrypted file: $originalTarName")
         return
     }
@@ -214,7 +214,7 @@ fun <R> useIOStreams(
 }
 
 
-fun encryptButtonHandler(dirUri: Uri?, context: Context){
+fun encryptButtonHandler(dirUri: Uri?, password: String, context: Context){
     dirUri ?: return
     val (tarFile, keyAlias) = createTarAndGetKeyAlias(dirUri, context) ?: return
     val encryptedTarFile = File(context.cacheDir, "${tarFile.name}.enc")
@@ -230,7 +230,7 @@ fun encryptButtonHandler(dirUri: Uri?, context: Context){
     val isEncryptionSuccessful = useIOStreams(
         tarFileUri, encryptedTarFileUri, context
     ) { unencryptedInputStream, unencryptedOutputStream ->
-        cryptoManager.encryptStream(unencryptedInputStream, keyAlias, unencryptedOutputStream)
+        cryptoManager.encryptStream(unencryptedInputStream, password, keyAlias, unencryptedOutputStream)
     } ?: false
 
     if (!isEncryptionSuccessful) {

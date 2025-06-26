@@ -1,7 +1,5 @@
 package com.example.encryptor
 
-import android.content.Context
-import android.net.Uri
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Log
@@ -12,12 +10,16 @@ import java.io.InputStream
 import java.io.OutputStream
 import java.security.KeyStore
 import java.security.KeyStoreException
+import java.security.SecureRandom
 import javax.crypto.Cipher
 import javax.crypto.CipherInputStream
 import javax.crypto.CipherOutputStream
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
+import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.GCMParameterSpec
+import javax.crypto.spec.PBEKeySpec
+import javax.crypto.spec.SecretKeySpec
 
 class CryptoManager {
     // Static properties, pertain to the class rather than its instances.
@@ -32,13 +34,13 @@ class CryptoManager {
         load(null)
     }
 
-    private fun initCipher(mode: String, keyAlias: String, iv: ByteArray? = null): Cipher {
+    private fun initCipher(mode: String, secretKey: SecretKey, iv: ByteArray? = null): Cipher {
         val cipherInstance = Cipher.getInstance(TRANSFORMATION)
 
         return if (mode == "ENCRYPT") {
-            cipherInstance.apply{ init(Cipher.ENCRYPT_MODE, retrieveOrCreateKey(keyAlias)) }
+            cipherInstance.apply{ init(Cipher.ENCRYPT_MODE, secretKey) }
         } else if (mode == "DECRYPT" && iv != null) {
-            cipherInstance.apply{ init(Cipher.DECRYPT_MODE, retrieveOrCreateKey(keyAlias), GCMParameterSpec(128, iv)) }
+            cipherInstance.apply{ init(Cipher.DECRYPT_MODE, secretKey, GCMParameterSpec(128, iv)) }
         } else {
             throw Exception("C'mon, just choose the right mode and iv if necessary")
         }
@@ -94,19 +96,52 @@ class CryptoManager {
         return iv
     }
 
+    fun deriveKeyFromPassword(
+        password: String,
+        salt: ByteArray,
+        iterations: Int = 100_000,
+        keyLength: Int = 256
+    ): SecretKeySpec {
+        val keySpec = PBEKeySpec(password.toCharArray(), salt, iterations, keyLength)
+        val secretKeyFactory = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
+        val secretKey = secretKeyFactory.generateSecret(keySpec)
+        return SecretKeySpec(secretKey.encoded, "AES")
+    }
+
+    fun generateRandomSalt(size: Int = 16): ByteArray {
+        val salt = ByteArray(size)
+        SecureRandom().nextBytes(salt)
+        return salt
+    }
+
     fun encryptStream(
         unencryptedInputStream: InputStream,
+        password: String,
         keyAlias: String,
         unencryptedOutputStream: OutputStream
     ): Boolean {
         return try {
-            val cipher = initCipher("ENCRYPT", keyAlias)
+            val streamSecretKey = retrieveOrCreateKey(keyAlias)
+            val contentCipher = initCipher("ENCRYPT", streamSecretKey)
+
+            val saltForSecretKey = generateRandomSalt()
+            val secretKeyForSecretKey = deriveKeyFromPassword(password, saltForSecretKey)
+            val keyCipher = initCipher("ENCRYPT", secretKeyForSecretKey)
 
             // Create a header.
-            unencryptedOutputStream.write(cipher.iv.size)
-            unencryptedOutputStream.write(cipher.iv)
+            // Sizes.
+            // TODO: Use multiple bytes for everything.
+            unencryptedOutputStream.write(contentCipher.iv.size)
+            unencryptedOutputStream.write(keyCipher.iv.size)
+            unencryptedOutputStream.write(saltForSecretKey.size)
+            // Contents.
+            unencryptedOutputStream.write(contentCipher.iv)
+            unencryptedOutputStream.write(keyCipher.iv)
+            unencryptedOutputStream.write(saltForSecretKey)
 
-            CipherOutputStream(unencryptedOutputStream, cipher).use { encryptedOutputStream ->
+            // TODO: Generate and append a public key to the header.
+
+            CipherOutputStream(unencryptedOutputStream, contentCipher).use { encryptedOutputStream ->
                 // WARNING: Overflows if iv.size > 255. Modern iv size is up
                 // to 24 bytes, so might only become an issue in the future.
                 unencryptedInputStream.copyTo(encryptedOutputStream)
@@ -125,7 +160,7 @@ class CryptoManager {
         decryptedOutputStream: OutputStream
     ): Boolean {
         return try {
-            val cipher = initCipher("DECRYPT", keyAlias, iv)
+            val cipher = initCipher("DECRYPT", retrieveOrCreateKey(keyAlias), iv)
 
             CipherInputStream(encryptedInputStream, cipher).use { decryptedInputStream ->
                 decryptedInputStream.copyTo(decryptedOutputStream)
@@ -141,7 +176,7 @@ class CryptoManager {
         try {
             FileInputStream(encryptedFile).use { encryptedInputStream ->
                 val iv = extractIvFromInputStream(encryptedInputStream)
-                val cipher = initCipher("DECRYPT", keyAlias, iv)
+                val cipher = initCipher("DECRYPT", retrieveOrCreateKey(keyAlias), iv)
 
                 CipherInputStream(encryptedInputStream, cipher).use { decryptedInputStream ->
                     // Reduces the number of IO calls, making it faster.
