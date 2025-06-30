@@ -78,6 +78,7 @@ class CryptoManager {
         }
     }
 
+    //FIXME: TODO: Implement both software and keystore generated keys according to the diagram.
     private fun retrieveOrCreateKey(keyAlias: String): SecretKey {
         try {
             val entry = keyStore.getEntry(keyAlias, null) as? KeyStore.SecretKeyEntry
@@ -97,7 +98,15 @@ class CryptoManager {
         }
     }
 
+
     private fun createKey(keyAlias: String): SecretKey {
+        val keyGenerator = KeyGenerator.getInstance("AES")
+        keyGenerator.init(256)
+        return keyGenerator.generateKey()
+    }
+
+
+    /*private fun createKey(keyAlias: String): SecretKey {
         val keyGenerator = KeyGenerator.getInstance(ALGORITHM, "AndroidKeyStore")
 
         keyGenerator.init(
@@ -108,14 +117,15 @@ class CryptoManager {
                 .setBlockModes(BLOCK_MODE)
                 .setEncryptionPaddings(PADDING)
                 .setUserAuthenticationRequired(false) // WARN: Must be false. Making it true makes the key hardware-backed and non-exportable,
-                                                      // meaning you can't get the key to encrypt it and store in the header.
+                // meaning you can't get the key to encrypt it and store in the header.
                 .build()
         )
 
         return keyGenerator.generateKey()
-    }
+    }*/
 
-    private fun readFully(input: InputStream, buffer: ByteArray) {
+
+    /*private fun readFully(input: InputStream, buffer: ByteArray) {
         var bytesRead = 0
         while (bytesRead < buffer.size) {
             val read = input.read(buffer, bytesRead, buffer.size - bytesRead)
@@ -124,9 +134,22 @@ class CryptoManager {
             }
             bytesRead += read
         }
+    } */
+
+    private fun readFully(input: InputStream, buffer: ByteArray, label: String) {
+        var bytesRead = 0
+        while (bytesRead < buffer.size) {
+            val read = input.read(buffer, bytesRead, buffer.size - bytesRead)
+            if (read == -1) {
+                throw EOFException("Unexpected end of stream while reading $label")
+            }
+            bytesRead += read
+        }
+        println("$label (${buffer.size} bytes): ${buffer.joinToString(", ") { it.toUByte().toString() }}")
     }
 
-    fun extractDataFromHeader(input: InputStream): EncryptionHeader {
+
+    private fun extractDataFromHeader(input: InputStream): EncryptionHeader {
         val contentCipherIvSize = readTwoBytesToInt(input)
         val keyCipherIvSize = readTwoBytesToInt(input)
         val passwordSaltSize = readTwoBytesToInt(input)
@@ -137,10 +160,15 @@ class CryptoManager {
         val passwordSalt = ByteArray(passwordSaltSize)
         val encryptedStreamSecretKey = ByteArray(encryptedStreamSecretKeySize)
 
-        readFully(input, contentCipherIv)
+        /*readFully(input, contentCipherIv)
         readFully(input, keyCipherIv)
         readFully(input, passwordSalt)
-        readFully(input, encryptedStreamSecretKey)
+        readFully(input, encryptedStreamSecretKey)*/
+
+        readFully(input, contentCipherIv, "contentCipherIv")
+        readFully(input, keyCipherIv, "keyCipherIv")
+        readFully(input, passwordSalt, "passwordSalt")
+        readFully(input, encryptedStreamSecretKey, "encryptedStreamSecretKey")
 
         return EncryptionHeader(
             contentCipherIv = contentCipherIv,
@@ -217,14 +245,13 @@ class CryptoManager {
                 )
             }
 
-            // FIXME: Still null for some reason.
             val streamSecretKeyBytes = streamSecretKey.encoded
                 ?: throw IllegalStateException("streamSecretKey encoding unavailable. " +
                         "Check if the key is exportable (has to be NOT backed by hardware)")
 
             val encryptedStreamSecretKey = keyCipher.doFinal(streamSecretKeyBytes)
 
-            // Create a header.
+            /* // Create a header.
             // Sizes.
             unencryptedOutputStream.write(intToTwoBytes(contentCipher.iv.size))
             unencryptedOutputStream.write(intToTwoBytes(keyCipher.iv.size))
@@ -234,7 +261,38 @@ class CryptoManager {
             unencryptedOutputStream.write(contentCipher.iv)
             unencryptedOutputStream.write(keyCipher.iv)
             unencryptedOutputStream.write(passwordSalt)
+            unencryptedOutputStream.write(encryptedStreamSecretKey) */
+
+            // Sizes
+            val contentCipherIvSizeBytes = intToTwoBytes(contentCipher.iv.size)
+            println("contentCipher.iv.size (${contentCipher.iv.size}): ${contentCipherIvSizeBytes.joinToString(", ") { it.toUByte().toString() }}")
+            unencryptedOutputStream.write(contentCipherIvSizeBytes)
+
+            val keyCipherIvSizeBytes = intToTwoBytes(keyCipher.iv.size)
+            println("keyCipher.iv.size (${keyCipher.iv.size}): ${keyCipherIvSizeBytes.joinToString(", ") { it.toUByte().toString() }}")
+            unencryptedOutputStream.write(keyCipherIvSizeBytes)
+
+            val passwordSaltSizeBytes = intToTwoBytes(passwordSalt.size)
+            println("passwordSalt.size (${passwordSalt.size}): ${passwordSaltSizeBytes.joinToString(", ") { it.toUByte().toString() }}")
+            unencryptedOutputStream.write(passwordSaltSizeBytes)
+
+            val encryptedStreamSecretKeySizeBytes = intToTwoBytes(encryptedStreamSecretKey.size)
+            println("encryptedStreamSecretKey.size (${encryptedStreamSecretKey.size}): ${encryptedStreamSecretKeySizeBytes.joinToString(", ") { it.toUByte().toString() }}")
+            unencryptedOutputStream.write(encryptedStreamSecretKeySizeBytes)
+
+            // Header contents
+            println("contentCipher.iv: ${contentCipher.iv.joinToString(", ") { it.toUByte().toString() }}")
+            unencryptedOutputStream.write(contentCipher.iv)
+
+            println("keyCipher.iv: ${keyCipher.iv.joinToString(", ") { it.toUByte().toString() }}")
+            unencryptedOutputStream.write(keyCipher.iv)
+
+            println("passwordSalt: ${passwordSalt.joinToString(", ") { it.toUByte().toString() }}")
+            unencryptedOutputStream.write(passwordSalt)
+
+            println("encryptedStreamSecretKey: ${encryptedStreamSecretKey.joinToString(", ") { it.toUByte().toString() }}")
             unencryptedOutputStream.write(encryptedStreamSecretKey)
+
 
             // Encrypt main content.
             CipherOutputStream(unencryptedOutputStream, contentCipher).use { encryptedOutputStream ->
@@ -271,7 +329,7 @@ class CryptoManager {
     }
 
     fun isIntegrityCheckPassed(encryptedFile: File, keyAlias: String): Boolean {
-        try {
+        return try {
             FileInputStream(encryptedFile).use { encryptedInputStream ->
                 val encryptionHeader = extractDataFromHeader(encryptedInputStream)
                 val cipher = initCipher(
@@ -288,13 +346,12 @@ class CryptoManager {
                     }
                 }
             }
-            return true
+            true
         } catch (e: Exception) {
             Log.e("IntegrityCheck", "ERROR: Unexpected failure during integrity verification")
             Log.e("IntegrityCheck", e.toString())
+            false
         }
-
-        return false
     }
 }
 
