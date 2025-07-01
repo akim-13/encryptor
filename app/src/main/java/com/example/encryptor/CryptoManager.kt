@@ -56,6 +56,7 @@ data class EncryptionHeader(
 class CryptoManager {
     // Static properties, pertain to the class rather than its instances.
     companion object {
+        private const val KEY_SIZE = 256
         private const val ALGORITHM = KeyProperties.KEY_ALGORITHM_AES
         private const val BLOCK_MODE = KeyProperties.BLOCK_MODE_GCM
         private const val PADDING = KeyProperties.ENCRYPTION_PADDING_NONE
@@ -65,6 +66,8 @@ class CryptoManager {
     private val keyStore = KeyStore.getInstance("AndroidKeyStore").apply {
         load(null)
     }
+    
+    private lateinit var masterKey: SecretKey;
 
     private fun initCipher(mode: String, secretKey: SecretKey, iv: ByteArray? = null): Cipher {
         val cipherInstance = Cipher.getInstance(TRANSFORMATION)
@@ -86,27 +89,27 @@ class CryptoManager {
             return if (entry != null) {
                 entry.secretKey
             } else {
-                createKey(keyAlias)
+                generateHardwareBackedKey(keyAlias)
             }
 
         } catch (e: KeyStoreException) {
             // If the key is invalid (e.g., locked due to authentication), delete it.
             keyStore.deleteEntry(keyAlias)
-            return createKey(keyAlias)
+            return generateHardwareBackedKey(keyAlias)
         } catch (e: Exception) {
             throw ErrorRetrievingKeyException("Error retrieving key: \"$keyAlias\"", e)
         }
     }
 
 
-    private fun createKey(keyAlias: String): SecretKey {
-        val keyGenerator = KeyGenerator.getInstance("AES")
-        keyGenerator.init(256)
+    private fun generateSoftwareKey(): SecretKey {
+        val keyGenerator = KeyGenerator.getInstance(ALGORITHM)
+        keyGenerator.init(KEY_SIZE)
         return keyGenerator.generateKey()
     }
 
 
-    /*private fun createKey(keyAlias: String): SecretKey {
+    private fun generateHardwareBackedKey(keyAlias: String): SecretKey {
         val keyGenerator = KeyGenerator.getInstance(ALGORITHM, "AndroidKeyStore")
 
         keyGenerator.init(
@@ -116,13 +119,12 @@ class CryptoManager {
             )
                 .setBlockModes(BLOCK_MODE)
                 .setEncryptionPaddings(PADDING)
-                .setUserAuthenticationRequired(false) // WARN: Must be false. Making it true makes the key hardware-backed and non-exportable,
-                // meaning you can't get the key to encrypt it and store in the header.
+                .setUserAuthenticationRequired(false)  // TODO: Set to true
                 .build()
         )
 
         return keyGenerator.generateKey()
-    }*/
+    }
 
 
     /*private fun readFully(input: InputStream, buffer: ByteArray) {
@@ -178,6 +180,7 @@ class CryptoManager {
         )
     }
 
+
     fun extractIvFromInputStream(inputStream: InputStream): ByteArray {
         val ivSize = readTwoBytesToInt(inputStream)
         val iv = ByteArray(ivSize)
@@ -192,23 +195,26 @@ class CryptoManager {
         return iv
     }
 
-    fun deriveKeyFromPassword(
+
+    private fun deriveKeyFromPassword(
         password: String,
         salt: ByteArray,
         iterations: Int = 100_000,
-        keyLength: Int = 256
+        keySize: Int = KEY_SIZE
     ): SecretKeySpec {
-        val keySpec = PBEKeySpec(password.toCharArray(), salt, iterations, keyLength)
+        val keySpec = PBEKeySpec(password.toCharArray(), salt, iterations, keySize)
         val secretKeyFactory = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
         val secretKey = secretKeyFactory.generateSecret(keySpec)
-        return SecretKeySpec(secretKey.encoded, "AES")
+        return SecretKeySpec(secretKey.encoded, ALGORITHM)
     }
+
 
     private fun generateRandomSalt(size: Int = 16): ByteArray {
         val salt = ByteArray(size)
         SecureRandom().nextBytes(salt)
         return salt
     }
+
 
     private fun readTwoBytesToInt(input: InputStream): Int {
         val leftByte = input.read()
@@ -229,10 +235,12 @@ class CryptoManager {
         unencryptedOutputStream: OutputStream
     ): Boolean {
         return try {
-            val streamSecretKey = retrieveOrCreateKey(keyAlias)
-            val contentCipher = initCipher("ENCRYPT", streamSecretKey)
+            masterKey = generateSoftwareKey()
+            val contentCipher = initCipher("ENCRYPT", masterKey)
 
-            if (password == "") throw EmptyPasswordException("The password cannot be empty.")
+            if (password == "") {
+                throw EmptyPasswordException("The password cannot be empty.")
+            }
 
             val passwordSalt = generateRandomSalt()
             val secretKeyForSecretKey = deriveKeyFromPassword(password, passwordSalt)
@@ -245,9 +253,8 @@ class CryptoManager {
                 )
             }
 
-            val streamSecretKeyBytes = streamSecretKey.encoded
-                ?: throw IllegalStateException("streamSecretKey encoding unavailable. " +
-                        "Check if the key is exportable (has to be NOT backed by hardware)")
+            val streamSecretKeyBytes = masterKey.encoded
+                ?: throw IllegalStateException("Idk, the key should've been set by now.")
 
             val encryptedStreamSecretKey = keyCipher.doFinal(streamSecretKeyBytes)
 
@@ -316,7 +323,9 @@ class CryptoManager {
         decryptedOutputStream: OutputStream
     ): Boolean {
         return try {
-            val cipher = initCipher("DECRYPT", retrieveOrCreateKey(keyAlias), iv)
+            // FIXME: derive masterKey from password or access through keystore?
+            // currently doesn't work. masterKey isn't set in this class instance.
+            val cipher = initCipher("DECRYPT", masterKey, iv)
 
             CipherInputStream(encryptedInputStream, cipher).use { decryptedInputStream ->
                 decryptedInputStream.copyTo(decryptedOutputStream)
@@ -330,11 +339,16 @@ class CryptoManager {
 
     fun isIntegrityCheckPassed(encryptedFile: File, keyAlias: String): Boolean {
         return try {
+            if (!::masterKey.isInitialized) {
+                throw IllegalStateException("Can't perform integrity check if the masterKey" +
+                        " wasn't set during encryption in this class instance.")
+            }
+
             FileInputStream(encryptedFile).use { encryptedInputStream ->
                 val encryptionHeader = extractDataFromHeader(encryptedInputStream)
                 val cipher = initCipher(
                     "DECRYPT",
-                    retrieveOrCreateKey(keyAlias),
+                    masterKey,
                     encryptionHeader.contentCipherIv
                 )
 
@@ -348,7 +362,7 @@ class CryptoManager {
             }
             true
         } catch (e: Exception) {
-            Log.e("IntegrityCheck", "ERROR: Unexpected failure during integrity verification")
+            Log.e("IntegrityCheck", "ERROR: Unexpected failure during integrity verification.")
             Log.e("IntegrityCheck", e.toString())
             false
         }
