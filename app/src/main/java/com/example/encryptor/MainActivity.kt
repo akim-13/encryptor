@@ -105,7 +105,7 @@ fun Main() {
             Button(
                 onClick = {
                     try {
-                        decryptButtonHandler(selectedUri.value, context)
+                        decryptButtonHandler(selectedUri.value, password, context)
                     } catch (e: Exception) {
                         // TODO: Inform the user.
                         Log.e("UnexpectedError", "An unexpected error occurred", e)
@@ -129,7 +129,7 @@ fun Main() {
 
 }
 
-fun decryptButtonHandler(dirUri: Uri?, context: Context) {
+fun decryptButtonHandler(dirUri: Uri?, password: String, context: Context) {
     dirUri ?: return
     val dir = DocumentFile.fromTreeUri(context, dirUri)
     val encryptedDocumentFile: DocumentFile? =
@@ -152,20 +152,21 @@ fun decryptButtonHandler(dirUri: Uri?, context: Context) {
     val isDecryptionSuccessful = useIOStreams(
         encryptedDocumentFile.uri, decryptedTarDocumentFile.uri, context
     ) { encryptedInputStream, decryptedOutputStream ->
-        // FIXME: Extract key alias from encrypted tar header.
-        val iv = cryptoManager.extractIvFromInputStream(encryptedInputStream)
-        val keyAlias = ""
-        cryptoManager.decryptStream(encryptedInputStream, iv, keyAlias, decryptedOutputStream)
+        cryptoManager.decryptStream(encryptedInputStream, password, decryptedOutputStream)
     } ?: false
 
     if (!isDecryptionSuccessful) {
         // TODO: Notify the user.
-        println("Faaaaaaaaaaaaaaaaaaaaaaaaaaaaaail")
+        Log.e("Decryption", "Decryption failed.")
         if (!decryptedTarDocumentFile.delete()) {
             Log.e("FileError", "Failed to delete ${decryptedTarDocumentFile.name}")
         }
         return
     }
+
+    Log.i("Decryption", "Decrypted successfully!")
+
+    // TODO: Unarchive the decrypted file and delete the encrypted archive.
 }
 
 // <R> defines a generic type parameter.
@@ -235,14 +236,20 @@ fun encryptButtonHandler(dirUri: Uri?, password: String, context: Context){
 
     if (!isEncryptionSuccessful) {
         // TODO: Let the user know that nothing has been encrypted or changed.
+        Log.e("Encryption", "Encryption failed.")
         return
     }
 
-    if (cryptoManager.isIntegrityCheckPassed(encryptedTarFile, keyAlias)) {
+    Log.i("Encryption", "Encrypted successfully!")
+
+    if (cryptoManager.isIntegrityCheckPassed(encryptedTarFile)) {
+        Log.i("IntegrityCheck", "Integrity check passed successfully!")
         deleteAllFilesInDirUri(dirUri, context)
+        // TODO: Consider what happens if copying fails.
         copyFileToDir(encryptedTarFile, dirUri, context)
     } else {
         // TODO: Let the user know that nothing has been encrypted or changed.
+        Log.e("IntegrityCheck", "Integrity check failed!")
     }
 }
 
