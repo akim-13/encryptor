@@ -242,14 +242,31 @@ fun encryptButtonHandler(dirUri: Uri?, password: String, context: Context){
 
     Log.i("Encryption", "Encrypted successfully!")
 
-    if (cryptoManager.isIntegrityCheckPassed(encryptedTarFile)) {
+    // Needed to open an output stream. It's never actually used.
+    val dummyFile = File.createTempFile("dummy", ".tmp", context.cacheDir)
+    val dummyUri = Uri.fromFile(dummyFile)
+
+    val isIntegrityCheckPassed = useIOStreams(
+        encryptedTarFileUri, dummyUri, context
+    ) { encryptedInputStream, decryptedOutputStream ->
+        cryptoManager.decryptStream(
+            encryptedInputStream,
+            password,
+            decryptedOutputStream,
+            true
+        )
+    } ?: false
+
+    dummyFile.delete()
+
+    if (isIntegrityCheckPassed) {
         Log.i("IntegrityCheck", "Integrity check passed successfully!")
         deleteAllFilesInDirUri(dirUri, context)
         // TODO: Consider what happens if copying fails.
         copyFileToDir(encryptedTarFile, dirUri, context)
     } else {
         // TODO: Let the user know that nothing has been encrypted or changed.
-        Log.e("IntegrityCheck", "Integrity check failed!")
+        Log.e("IntegrityCheck", "Integrity check failed.")
     }
 }
 

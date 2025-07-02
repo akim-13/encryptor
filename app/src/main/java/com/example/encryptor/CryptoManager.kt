@@ -66,9 +66,6 @@ class CryptoManager {
         load(null)
     }
 
-    // TODO: Remove.
-    private lateinit var masterKey: SecretKey
-
     private fun initCipher(mode: String, secretKey: SecretKey, iv: ByteArray? = null): Cipher {
         val cipherInstance = Cipher.getInstance(TRANSFORMATION)
 
@@ -203,7 +200,7 @@ class CryptoManager {
         unencryptedOutputStream: OutputStream
     ): Boolean {
         return try {
-            masterKey = generateSoftwareKey()
+            val masterKey = generateSoftwareKey()
             val contentCipher = initCipher("ENCRYPT", masterKey)
 
             if (password == "") {
@@ -255,11 +252,12 @@ class CryptoManager {
         }
     }
 
-    // TODO: Implement a `isIntegrityCheck` parameter.
+
     fun decryptStream(
         encryptedInputStream: InputStream,
         password: String,
-        decryptedOutputStream: OutputStream
+        decryptedOutputStream: OutputStream,
+        isIntegrityCheck: Boolean = false,
     ): Boolean {
         return try {
             val encryptionHeader = extractDataFromHeader(encryptedInputStream)
@@ -268,47 +266,28 @@ class CryptoManager {
             val masterKeyBytes = keyCipher.doFinal(encryptionHeader.encryptedStreamSecretKey)
             val masterKey = SecretKeySpec(masterKeyBytes, ALGORITHM)
 
-            val cipher = initCipher("DECRYPT", masterKey, encryptionHeader.contentCipherIv)
+            val streamCipher = initCipher("DECRYPT", masterKey, encryptionHeader.contentCipherIv)
 
-            CipherInputStream(encryptedInputStream, cipher).use { decryptedInputStream ->
-                decryptedInputStream.copyTo(decryptedOutputStream)
-            }
-            true
-        } catch(e: Exception) {
-            Log.e("DecryptionError", "Decryption failed!!!", e)
-            false
-        }
-    }
-
-    // TODO: Remove by integrating into decryptStream().
-    fun isIntegrityCheckPassed(encryptedFile: File): Boolean {
-        return try {
-            // TODO: Actually it shouldn't be a class attribute. Derive it from password instead.
-            if (!::masterKey.isInitialized) {
-                throw IllegalStateException("Can't perform integrity check if the masterKey" +
-                        " wasn't set during encryption in this class instance.")
-            }
-
-            FileInputStream(encryptedFile).use { encryptedInputStream ->
-                val encryptionHeader = extractDataFromHeader(encryptedInputStream)
-                val cipher = initCipher(
-                    "DECRYPT",
-                    masterKey,
-                    encryptionHeader.contentCipherIv
-                )
-
-                CipherInputStream(encryptedInputStream, cipher).use { decryptedInputStream ->
+            CipherInputStream(encryptedInputStream, streamCipher).use { decryptedInputStream ->
+                if (!isIntegrityCheck) {
+                    decryptedInputStream.copyTo(decryptedOutputStream)
+                } else {
                     // Reduces the number of IO calls, making it faster.
                     val buffer = ByteArray(4096)
                     while (decryptedInputStream.read(buffer) != -1) {
-                        // Just read through the file to force decryption/authentication
+                        // Just read through the file to force decryption/authentication.
                     }
                 }
             }
+
             true
-        } catch (e: Exception) {
-            Log.e("IntegrityCheck", "ERROR: Unexpected failure during integrity verification.")
-            Log.e("IntegrityCheck", e.toString())
+        } catch(e: Exception) {
+            if (!isIntegrityCheck) {
+                Log.e("DecryptionError", "Decryption failed!!!", e)
+            } else {
+                Log.e("IntegrityCheck", "Unexpected failure during integrity verification.", e)
+            }
+
             false
         }
     }
