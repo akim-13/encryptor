@@ -4,10 +4,7 @@ import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Log
 import java.io.EOFException
-import java.io.File
-import java.io.FileInputStream
 import java.io.InputStream
-import java.io.OutputStream
 import java.security.KeyStore
 import java.security.KeyStoreException
 import java.security.SecureRandom
@@ -192,14 +189,15 @@ class CryptoManager {
         return (leftByte shl 8) or rightByte
     }
 
-
     fun encryptStream(
-        unencryptedInputStream: InputStream,
+        fileIOStreams: IOStreams,
+        metadataIOStreams: IOStreams,
         password: String,
-        keyAlias: String,
-        unencryptedOutputStream: OutputStream
     ): Boolean {
         return try {
+            val unencryptedInputStream = fileIOStreams.input
+            val encryptedOutputStream = fileIOStreams.output
+
             val masterKey = generateSoftwareKey()
             val contentCipher = initCipher("ENCRYPT", masterKey)
 
@@ -224,42 +222,49 @@ class CryptoManager {
             val encryptedStreamSecretKey = keyCipher.doFinal(streamSecretKeyBytes)
 
             // TODO: Create, encrypt, and store a hardware-backed key in the metadata file for biometrics.
+            // Read METADATA file if it exists
+            // See if it contains a valid key alias
+            // If it does, read it from the keystore
+            // Otherwise create a new one
 
             // Create a header.
             // Sizes.
-            unencryptedOutputStream.write(intToTwoBytes(contentCipher.iv.size))
-            unencryptedOutputStream.write(intToTwoBytes(keyCipher.iv.size))
-            unencryptedOutputStream.write(intToTwoBytes(passwordSalt.size))
-            unencryptedOutputStream.write(intToTwoBytes(encryptedStreamSecretKey.size))
+            encryptedOutputStream.write(intToTwoBytes(contentCipher.iv.size))
+            encryptedOutputStream.write(intToTwoBytes(keyCipher.iv.size))
+            encryptedOutputStream.write(intToTwoBytes(passwordSalt.size))
+            encryptedOutputStream.write(intToTwoBytes(encryptedStreamSecretKey.size))
             // Header contents.
-            unencryptedOutputStream.write(contentCipher.iv)
-            unencryptedOutputStream.write(keyCipher.iv)
-            unencryptedOutputStream.write(passwordSalt)
-            unencryptedOutputStream.write(encryptedStreamSecretKey)
+            encryptedOutputStream.write(contentCipher.iv)
+            encryptedOutputStream.write(keyCipher.iv)
+            encryptedOutputStream.write(passwordSalt)
+            encryptedOutputStream.write(encryptedStreamSecretKey)
 
             // Encrypt main content.
-            CipherOutputStream(unencryptedOutputStream, contentCipher).use { encryptedOutputStream ->
-                unencryptedInputStream.copyTo(encryptedOutputStream)
+            CipherInputStream(unencryptedInputStream, contentCipher).use { encryptedInputStream ->
+                encryptedInputStream.copyTo(encryptedOutputStream)
                 encryptedOutputStream.flush()
             }
+
             true
         } catch (e: EmptyPasswordException) {
             Log.e("EmptyPasswordException", "Empty password supplied.", e)
             false
         } catch (e: Exception) {
-            Log.e("EncryptionError", "Encryption failed (key: \"${keyAlias}\")", e)
+            Log.e("EncryptionError", "Encryption failed.", e)
             false
         }
     }
 
 
     fun decryptStream(
-        encryptedInputStream: InputStream,
+        fileIOStreams: IOStreams,
         password: String,
-        decryptedOutputStream: OutputStream,
         isIntegrityCheck: Boolean = false,
     ): Boolean {
         return try {
+            val encryptedInputStream = fileIOStreams.input
+            val decryptedOutputStream = fileIOStreams.output
+
             val encryptionHeader = extractDataFromHeader(encryptedInputStream)
             val secretKeyForMasterKey = deriveKeyFromPassword(password, encryptionHeader.passwordSalt)
             val keyCipher = initCipher("DECRYPT", secretKeyForMasterKey, encryptionHeader.keyCipherIv)

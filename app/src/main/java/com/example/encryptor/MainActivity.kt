@@ -129,52 +129,18 @@ fun Main() {
 
 }
 
-fun decryptButtonHandler(dirUri: Uri?, password: String, context: Context) {
-    dirUri ?: return
-    val dir = DocumentFile.fromTreeUri(context, dirUri)
-    val encryptedDocumentFile: DocumentFile? =
-        dir?.listFiles()?.singleOrNull { it.name?.endsWith(".tar.enc") == true }
+data class IOStreams(
+    val input: InputStream,
+    val output: OutputStream
+)
 
-    if (encryptedDocumentFile == null) {
-        // TODO: Notify the user the directory isn't encrypted/is invalid.
-        return
-    }
-
-    val originalTarName = encryptedDocumentFile.name?.removeSuffix(".enc") ?: "decrypted.tar"
-    val decryptedTarDocumentFile = dir.createFile("application/x-tar", originalTarName)
-    if (decryptedTarDocumentFile == null) {
-        // TODO: Notify the user.
-        Log.e("FileError", "Failed to create decrypted file: $originalTarName")
-        return
-    }
-    val cryptoManager = CryptoManager()
-
-    val isDecryptionSuccessful = useIOStreams(
-        encryptedDocumentFile.uri, decryptedTarDocumentFile.uri, context
-    ) { encryptedInputStream, decryptedOutputStream ->
-        cryptoManager.decryptStream(encryptedInputStream, password, decryptedOutputStream)
-    } ?: false
-
-    if (!isDecryptionSuccessful) {
-        // TODO: Notify the user.
-        Log.e("Decryption", "Decryption failed.")
-        if (!decryptedTarDocumentFile.delete()) {
-            Log.e("FileError", "Failed to delete ${decryptedTarDocumentFile.name}")
-        }
-        return
-    }
-
-    Log.i("Decryption", "Decrypted successfully!")
-
-    // TODO: Unarchive the decrypted file and delete the encrypted archive.
-}
 
 // <R> defines a generic type parameter.
 fun <R> useIOStreams(
     inputUri: Uri,
     outputUri: Uri,
     context: Context,
-    block: (InputStream, OutputStream) -> R // Defines a lambda inside { I, O -> R }.
+    block: (IOStreams) -> R   // Defines a lambda inside { IO -> R }.
 ): R? {
     val contentResolver = context.contentResolver
 
@@ -205,7 +171,7 @@ fun <R> useIOStreams(
     return try {
         inputStream.use { inStream ->
             outputStream.use { outStream ->
-                block(inStream, outStream) // Execute the lambda inside { I, O -> R }.
+                block(IOStreams(inStream, outStream))  // Execute the lambda inside { I, O -> R }.
             }
         }
     } catch (e: Exception) {
@@ -215,8 +181,62 @@ fun <R> useIOStreams(
 }
 
 
+fun decryptButtonHandler(dirUri: Uri?, password: String, context: Context) {
+    dirUri ?: return
+    val dir = DocumentFile.fromTreeUri(context, dirUri)
+    val encryptedDocumentFile: DocumentFile? =
+        dir?.listFiles()?.singleOrNull { it.name?.endsWith(".tar.enc") == true }
+
+    if (encryptedDocumentFile == null) {
+        // TODO: Notify the user the directory isn't encrypted/is invalid.
+        return
+    }
+
+    val originalTarName = encryptedDocumentFile.name?.removeSuffix(".enc") ?: "decrypted.tar"
+    val decryptedTarDocumentFile = dir.createFile("application/x-tar", originalTarName)
+    if (decryptedTarDocumentFile == null) {
+        // TODO: Notify the user.
+        Log.e("FileError", "Failed to create decrypted file: $originalTarName")
+        return
+    }
+    val cryptoManager = CryptoManager()
+
+    val isDecryptionSuccessful = useIOStreams(
+        encryptedDocumentFile.uri,
+        decryptedTarDocumentFile.uri,
+        context
+    ) { fileIOStreams ->
+        cryptoManager.decryptStream(fileIOStreams, password)
+    } ?: false
+
+    if (!isDecryptionSuccessful) {
+        // TODO: Notify the user.
+        Log.e("Decryption", "Decryption failed.")
+        if (!decryptedTarDocumentFile.delete()) {
+            Log.e("FileError", "Failed to delete ${decryptedTarDocumentFile.name}")
+        }
+        return
+    }
+
+    Log.i("Decryption", "Decrypted successfully!")
+
+    // TODO: Unarchive the decrypted file and delete the encrypted archive.
+}
+
+
 fun encryptButtonHandler(dirUri: Uri?, password: String, context: Context){
     dirUri ?: return
+
+    val selectedRootDir = DocumentFile.fromTreeUri(context, dirUri)
+    val metadataFile = selectedRootDir?.findFile(METADATA_FILENAME)
+        ?: selectedRootDir?.createFile("text/plain", METADATA_FILENAME)
+    val metadataFileUri = metadataFile?.uri
+
+   if (metadataFileUri == null) {
+       Log.e("MetadataFile", "Failed to read or create \"${METADATA_FILENAME}\".")
+       return
+   }
+
     val (tarFile, keyAlias) = createTarAndGetKeyAlias(dirUri, context) ?: return
     val encryptedTarFile = File(context.cacheDir, "${tarFile.name}.enc")
     if (encryptedTarFile.exists()) {
@@ -229,10 +249,19 @@ fun encryptButtonHandler(dirUri: Uri?, password: String, context: Context){
     val tarFileUri = Uri.fromFile(tarFile)
 
     val isEncryptionSuccessful = useIOStreams(
-        tarFileUri, encryptedTarFileUri, context
-    ) { unencryptedInputStream, unencryptedOutputStream ->
-        cryptoManager.encryptStream(unencryptedInputStream, password, keyAlias, unencryptedOutputStream)
+        tarFileUri,
+        encryptedTarFileUri,
+        context
+    ) { unencryptedIOStreams ->
+        useIOStreams(
+            metadataFileUri,
+            metadataFileUri,
+            context
+        ) { metadataIOStreams ->
+            cryptoManager.encryptStream(unencryptedIOStreams, metadataIOStreams, password)
+        }
     } ?: false
+
 
     if (!isEncryptionSuccessful) {
         // TODO: Let the user know that nothing has been encrypted or changed.
@@ -248,11 +277,10 @@ fun encryptButtonHandler(dirUri: Uri?, password: String, context: Context){
 
     val isIntegrityCheckPassed = useIOStreams(
         encryptedTarFileUri, dummyUri, context
-    ) { encryptedInputStream, decryptedOutputStream ->
+    ) { fileIOStreams ->
         cryptoManager.decryptStream(
-            encryptedInputStream,
+            fileIOStreams,
             password,
-            decryptedOutputStream,
             true
         )
     } ?: false
