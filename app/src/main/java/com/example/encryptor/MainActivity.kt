@@ -30,7 +30,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
-import androidx.core.content.FileProvider
 import androidx.documentfile.provider.DocumentFile
 import com.example.encryptor.ui.theme.EncryptorTheme
 import java.io.File
@@ -40,9 +39,14 @@ import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream
 import java.io.Closeable
 import java.io.InputStream
 import java.io.OutputStream
-import java.util.UUID
 
 const val METADATA_FILENAME = ".encryptor"
+
+data class IOStreams(
+    val input: InputStream,
+    val output: OutputStream
+)
+
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -128,11 +132,6 @@ fun Main() {
     }
 
 }
-
-data class IOStreams(
-    val input: InputStream,
-    val output: OutputStream
-)
 
 
 // <R> defines a generic type parameter.
@@ -237,7 +236,7 @@ fun encryptButtonHandler(dirUri: Uri?, password: String, context: Context){
        return
    }
 
-    val (tarFile, keyAlias) = createTarAndGetKeyAlias(dirUri, context) ?: return
+    val tarFile = createTarFile(dirUri, context) ?: return  // TODO: Log.e also.
     val encryptedTarFile = File(context.cacheDir, "${tarFile.name}.enc")
     if (encryptedTarFile.exists()) {
         encryptedTarFile.delete()
@@ -245,8 +244,8 @@ fun encryptButtonHandler(dirUri: Uri?, password: String, context: Context){
     encryptedTarFile.createNewFile()
 
     val cryptoManager = CryptoManager()
-    val encryptedTarFileUri = Uri.fromFile(encryptedTarFile)
     val tarFileUri = Uri.fromFile(tarFile)
+    val encryptedTarFileUri = Uri.fromFile(encryptedTarFile)
 
     val isEncryptionSuccessful = useIOStreams(
         tarFileUri,
@@ -298,11 +297,13 @@ fun encryptButtonHandler(dirUri: Uri?, password: String, context: Context){
     }
 }
 
+
 fun getSelectedDirName(dirUri: Uri?, context: Context): String? {
     return dirUri?.let { uri ->
         return DocumentFile.fromTreeUri(context, uri)?.name ?: "Unknown"
     }
 }
+
 
 fun deleteAllFilesInDirUri(dirUri: Uri, context: Context) {
     val dir = DocumentFile.fromTreeUri(context, dirUri)
@@ -310,6 +311,7 @@ fun deleteAllFilesInDirUri(dirUri: Uri, context: Context) {
         file.delete()
     }
 }
+
 
 fun copyFileToDir(fileToCopy: File, destDirUri: Uri, context: Context) {
     val destinationDir = DocumentFile.fromTreeUri(context, destDirUri)
@@ -322,54 +324,49 @@ fun copyFileToDir(fileToCopy: File, destDirUri: Uri, context: Context) {
     }
 }
 
-fun createTarAndGetKeyAlias(dirUri: Uri, context: Context): Pair<File, String>? {
+
+fun createTarFile(dirUri: Uri, context: Context): File? {
     val rootDir = DocumentFile.fromTreeUri(context, dirUri) ?: return null
     val tarName = getSelectedDirName(dirUri, context)!! + ".tar"
     val tarFile = File(context.filesDir, tarName)
 
     var keyAlias = ""
     TarArchiveOutputStream(FileOutputStream(tarFile)).use { tarOut ->
-        // TODO: make this global or smth, this is a hack.
-        keyAlias = addDirToTarAndGetKeyAlias(rootDir, "", tarOut, context) ?: UUID.randomUUID().toString()
+        addDirToTarArchive(rootDir, "", tarOut, context)
     }
 
-    if (keyAlias == "") throw Exception("This shouldn't have happened")
-
-    return Pair(tarFile, keyAlias)
+    return tarFile
 }
 
-fun addDirToTarAndGetKeyAlias(
-    dir: DocumentFile,
-    base: String,
+
+// FIXME: There are potential issues apparently. Ask chat.
+fun addDirToTarArchive(
+    dirToAdd: DocumentFile,
+    relativePathPrefix: String,
     tarOut: TarArchiveOutputStream,
     context: Context
-): String? {
-    var keyAlias: String? = null
-    dir.listFiles().forEach { file ->
-        if (file.name == METADATA_FILENAME) {
-            keyAlias = context.contentResolver.openInputStream(file.uri)?.use{ inputStream ->
-                inputStream.bufferedReader().use { it.readText() }
-            }
-        }
-        val entryName = "$base${file.name}"
-        val entry = TarArchiveEntry(entryName)
+) {
+    dirToAdd.listFiles().forEach { dirEntry ->
 
-        if (file.isFile) {
-            context.contentResolver.openInputStream(file.uri)?.use {
-                entry.size = it.available().toLong()
-                tarOut.putArchiveEntry(entry)
+        val tarArchiveEntryName = "$relativePathPrefix${dirEntry.name}"
+        val tarArchiveEntry = TarArchiveEntry(tarArchiveEntryName)
+
+        if (dirEntry.isFile) {
+            context.contentResolver.openInputStream(dirEntry.uri)?.use {
+                tarArchiveEntry.size = it.available().toLong()
+                tarOut.putArchiveEntry(tarArchiveEntry)
                 it.copyTo(tarOut)
                 tarOut.closeArchiveEntry()
             }
         } else {
-            tarOut.putArchiveEntry(entry)
+            tarOut.putArchiveEntry(tarArchiveEntry)
             tarOut.closeArchiveEntry()
             // Recursively add all other files
-            addDirToTarAndGetKeyAlias(file, "$entryName/", tarOut, context)
+            addDirToTarArchive(dirEntry, "$tarArchiveEntryName/", tarOut, context)
         }
     }
-    return keyAlias
 }
+
 
 @Preview(showBackground = true)
 @Composable
@@ -378,6 +375,7 @@ fun GreetingPreview() {
         Main()
     }
 }
+
 
 fun displayQuery(cursor: Cursor?) {
     cursor?.use {
@@ -394,6 +392,7 @@ fun displayQuery(cursor: Cursor?) {
     }
 }
 
+
 fun Uri.toFile(context: Context): File? {
     val inputStream = context.contentResolver.openInputStream(this)
     val extension = MimeTypeMap.getSingleton().getExtensionFromMimeType(context.contentResolver.getType(this))
@@ -408,4 +407,3 @@ fun Uri.toFile(context: Context): File? {
         null
     }
 }
-
