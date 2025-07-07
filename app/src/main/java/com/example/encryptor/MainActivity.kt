@@ -35,6 +35,7 @@ import com.example.encryptor.ui.theme.EncryptorTheme
 import java.io.File
 import java.io.FileOutputStream
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry
+import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
 import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream
 import java.io.Closeable
 import java.io.InputStream
@@ -45,6 +46,11 @@ const val METADATA_FILENAME = ".encryptor"
 data class IOStreams(
     val input: InputStream,
     val output: OutputStream
+)
+
+data class IOFileUris(
+    val input: Uri,
+    val output: Uri
 )
 
 
@@ -136,12 +142,13 @@ fun Main() {
 
 // <R> defines a generic type parameter.
 fun <R> useIOStreams(
-    inputUri: Uri,
-    outputUri: Uri,
+    inputOutputFileUris: IOFileUris,
     context: Context,
     block: (IOStreams) -> R   // Defines a lambda inside { IO -> R }.
 ): R? {
     val contentResolver = context.contentResolver
+    val inputUri = inputOutputFileUris.input
+    val outputUri = inputOutputFileUris.output
 
     fun openStream(uri: Uri, isInput: Boolean): Closeable? {
         return try {
@@ -183,13 +190,9 @@ fun <R> useIOStreams(
 fun decryptButtonHandler(dirUri: Uri?, password: String, context: Context) {
     dirUri ?: return
     val dir = DocumentFile.fromTreeUri(context, dirUri)
-    val encryptedDocumentFile: DocumentFile? =
+    val encryptedDocumentFile: DocumentFile =
         dir?.listFiles()?.singleOrNull { it.name?.endsWith(".tar.enc") == true }
-
-    if (encryptedDocumentFile == null) {
-        // TODO: Notify the user the directory isn't encrypted/is invalid.
-        return
-    }
+            ?: return  // TODO: Notify the user the directory isn't encrypted/is invalid.
 
     val originalTarName = encryptedDocumentFile.name?.removeSuffix(".enc") ?: "decrypted.tar"
     val decryptedTarDocumentFile = dir.createFile("application/x-tar", originalTarName)
@@ -199,16 +202,19 @@ fun decryptButtonHandler(dirUri: Uri?, password: String, context: Context) {
         return
     }
     val cryptoManager = CryptoManager()
+    val inputOutputFileUris = IOFileUris(encryptedDocumentFile.uri, decryptedTarDocumentFile.uri)
 
     val isDecryptionSuccessful = useIOStreams(
-        encryptedDocumentFile.uri,
-        decryptedTarDocumentFile.uri,
+        inputOutputFileUris,
         context
     ) { fileIOStreams ->
         cryptoManager.decryptStream(fileIOStreams, password)
     } ?: false
 
-    if (!isDecryptionSuccessful) {
+    if (isDecryptionSuccessful) {
+        Log.i("Decryption", "Decrypted successfully!")
+        encryptedDocumentFile.delete()
+    } else {
         // TODO: Notify the user.
         Log.e("Decryption", "Decryption failed.")
         if (!decryptedTarDocumentFile.delete()) {
@@ -217,9 +223,19 @@ fun decryptButtonHandler(dirUri: Uri?, password: String, context: Context) {
         return
     }
 
-    Log.i("Decryption", "Decrypted successfully!")
+    val extractionSuccessful = extractTarToDirectory(
+        decryptedTarDocumentFile.uri,
+        dir,
+        context
+    )
 
-    // TODO: Unarchive the decrypted file and delete the encrypted archive.
+    if (extractionSuccessful) {
+        Log.i("Decryption", "Extracted successfully!")
+        decryptedTarDocumentFile.delete()
+    } else {
+        Log.e("Decryption", "Extraction failed")
+    }
+
 }
 
 
@@ -248,16 +264,14 @@ fun encryptButtonHandler(dirUri: Uri?, password: String, context: Context){
     val encryptedTarFileUri = Uri.fromFile(encryptedTarFile)
 
     val isEncryptionSuccessful = useIOStreams(
-        tarFileUri,
-        encryptedTarFileUri,
+        IOFileUris(tarFileUri, encryptedTarFileUri),
         context
-    ) { unencryptedIOStreams ->
+    ) { fileIOStreams ->
         useIOStreams(
-            metadataFileUri,
-            metadataFileUri,
+            IOFileUris(metadataFileUri, metadataFileUri),
             context
         ) { metadataIOStreams ->
-            cryptoManager.encryptStream(unencryptedIOStreams, metadataIOStreams, password)
+            cryptoManager.encryptStream(fileIOStreams, metadataIOStreams, password)
         }
     } ?: false
 
@@ -275,7 +289,7 @@ fun encryptButtonHandler(dirUri: Uri?, password: String, context: Context){
     val dummyUri = Uri.fromFile(dummyFile)
 
     val isIntegrityCheckPassed = useIOStreams(
-        encryptedTarFileUri, dummyUri, context
+        IOFileUris(encryptedTarFileUri, dummyUri), context
     ) { fileIOStreams ->
         cryptoManager.decryptStream(
             fileIOStreams,
@@ -289,7 +303,7 @@ fun encryptButtonHandler(dirUri: Uri?, password: String, context: Context){
     if (isIntegrityCheckPassed) {
         Log.i("IntegrityCheck", "Integrity check passed successfully!")
         deleteAllFilesInDirUri(dirUri, context)
-        // TODO: Consider what happens if copying fails.
+        // TODO: Copy first, delete everything but the encrypted archive afterwards.
         copyFileToDir(encryptedTarFile, dirUri, context)
     } else {
         // TODO: Let the user know that nothing has been encrypted or changed.
@@ -330,7 +344,6 @@ fun createTarFile(dirUri: Uri, context: Context): File? {
     val tarName = getSelectedDirName(dirUri, context)!! + ".tar"
     val tarFile = File(context.filesDir, tarName)
 
-    var keyAlias = ""
     TarArchiveOutputStream(FileOutputStream(tarFile)).use { tarOut ->
         addDirToTarArchive(rootDir, "", tarOut, context)
     }
@@ -349,7 +362,11 @@ fun addDirToTarArchive(
     dirToAdd.listFiles().forEach { dirEntry ->
 
         val tarArchiveEntryName = "$relativePathPrefix${dirEntry.name}"
-        val tarArchiveEntry = TarArchiveEntry(tarArchiveEntryName)
+        val tarArchiveEntry = if (dirEntry.isDirectory) {
+            TarArchiveEntry("$tarArchiveEntryName/")
+        } else {
+            TarArchiveEntry(tarArchiveEntryName)
+        }
 
         if (dirEntry.isFile) {
             context.contentResolver.openInputStream(dirEntry.uri)?.use {
@@ -368,12 +385,90 @@ fun addDirToTarArchive(
 }
 
 
-@Preview(showBackground = true)
-@Composable
-fun GreetingPreview() {
-    EncryptorTheme {
-        Main()
+// TODO: Test extensively, can potentially mess up user data!
+fun extractTarToDirectory(
+    tarUri: Uri,
+    targetDir: DocumentFile,
+    context: Context
+): Boolean {
+    return try {
+        context.contentResolver.openInputStream(tarUri)?.use { tarInputStream ->
+            TarArchiveInputStream(tarInputStream).use { tarIn ->
+                generateSequence { tarIn.nextEntry }.forEach { entry ->
+                    val pathSegments = entry.name
+                        .split('/')
+                        .filter { it.isNotEmpty() }
+
+                    // E.g., dirA/dirB/dirC.
+                    if (entry.isDirectory) {
+                        // Create the full path as folders.
+                        createDocumentDirectoryHierarchy(targetDir, pathSegments)
+                    } else {  // E.g., dirA/dirB/file.txt
+                        // Only create parent folders.
+                        val parentSegments = pathSegments.dropLast(1)
+                        val fileName = pathSegments.last()
+
+                        val parentDir = createDocumentDirectoryHierarchy(
+                            targetDir,
+                            parentSegments
+                        )
+
+                        // If the parentDir is not actually a directory, fail
+                        if (!parentDir.isDirectory) {
+                            Log.e("TAR-Extract", "Parent is not a directory: ${parentDir.name}")
+                            error("Parent is not a directory")
+                        }
+
+                        // In case this file already exists (somehow), delete it to overwrite later.
+                        parentDir.findFile(fileName)?.delete()
+
+                        val newFile = parentDir.createFile(
+                            "application/octet-stream",
+                            fileName
+                        ) ?: error("Failed to create file: $fileName")
+
+                        context.contentResolver.openOutputStream(newFile.uri)?.use { out ->
+                            tarIn.copyTo(out)
+                        }
+                    }
+                }
+
+            }
+        }
+        true
+    } catch (e: Exception) {
+        Log.e("TAR-Extract", "Error extracting TAR archive", e)
+        false
     }
+}
+
+
+fun createDocumentDirectoryHierarchy(
+    baseDir: DocumentFile,
+    pathSegments: List<String>
+): DocumentFile {
+    var currentDir = baseDir
+
+    for (segment in pathSegments) {
+        if (segment.isBlank())
+            continue
+
+        val subDir = currentDir.findFile(segment)
+        val subDirExists = subDir != null
+
+        currentDir = if (subDirExists) {
+            if (subDir!!.isDirectory) {
+                subDir
+            } else {
+                Log.e("TAR-Extract", "Existing item is a file, not a directory: $segment")
+                error("Path conflict: $segment is a file, but expected a directory")
+            }
+        } else {
+            currentDir.createDirectory(segment) ?: error("Could not create directory $segment")
+        }
+    }
+
+    return currentDir
 }
 
 
@@ -405,5 +500,14 @@ fun Uri.toFile(context: Context): File? {
         tempFile
     } catch (e: Exception) {
         null
+    }
+}
+
+
+@Preview(showBackground = true)
+@Composable
+fun GreetingPreview() {
+    EncryptorTheme {
+        Main()
     }
 }

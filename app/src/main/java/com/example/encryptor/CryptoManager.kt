@@ -189,6 +189,14 @@ class CryptoManager {
         return (leftByte shl 8) or rightByte
     }
 
+
+    private fun convertIntToTwoBytes(num: Int): ByteArray {
+        return byteArrayOf(
+            ((num shr 8) and 0xFF).toByte(),   // Leftmost byte first.
+            (num and 0xFF).toByte()            // Rightmost byte second.
+        )
+    }
+
     fun encryptStream(
         fileIOStreams: IOStreams,
         metadataIOStreams: IOStreams,
@@ -209,13 +217,6 @@ class CryptoManager {
             val secretKeyForMasterKey = deriveKeyFromPassword(password, passwordSalt)
             val keyCipher = initCipher("ENCRYPT", secretKeyForMasterKey)
 
-            val intToTwoBytes: (Int) -> ByteArray = { num ->
-                byteArrayOf(
-                    ((num shr 8) and 0xFF).toByte(),   // Leftmost byte first.
-                    (num and 0xFF).toByte()            // Rightmost byte second.
-                )
-            }
-
             val streamSecretKeyBytes = masterKey.encoded
                 ?: throw IllegalStateException("Idk, the key should've been set by now.")
 
@@ -229,10 +230,10 @@ class CryptoManager {
 
             // Create a header.
             // Sizes.
-            encryptedOutputStream.write(intToTwoBytes(contentCipher.iv.size))
-            encryptedOutputStream.write(intToTwoBytes(keyCipher.iv.size))
-            encryptedOutputStream.write(intToTwoBytes(passwordSalt.size))
-            encryptedOutputStream.write(intToTwoBytes(encryptedStreamSecretKey.size))
+            encryptedOutputStream.write(convertIntToTwoBytes(contentCipher.iv.size))
+            encryptedOutputStream.write(convertIntToTwoBytes(keyCipher.iv.size))
+            encryptedOutputStream.write(convertIntToTwoBytes(passwordSalt.size))
+            encryptedOutputStream.write(convertIntToTwoBytes(encryptedStreamSecretKey.size))
             // Header contents.
             encryptedOutputStream.write(contentCipher.iv)
             encryptedOutputStream.write(keyCipher.iv)
