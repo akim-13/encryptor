@@ -5,12 +5,13 @@ import android.security.keystore.KeyProperties
 import android.util.Log
 import java.io.EOFException
 import java.io.InputStream
+import java.nio.ByteBuffer
 import java.security.KeyStore
 import java.security.KeyStoreException
 import java.security.SecureRandom
+import java.util.UUID
 import javax.crypto.Cipher
 import javax.crypto.CipherInputStream
-import javax.crypto.CipherOutputStream
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.SecretKeyFactory
@@ -49,6 +50,33 @@ data class EncryptionHeader(
 }
 
 
+data class BiometricMetadata (
+    val keyAlias: UUID,
+    val encryptedKeyIv: ByteArray,
+    val encryptedKey: ByteArray
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (javaClass != other?.javaClass) return false
+
+        other as BiometricMetadata
+
+        if (keyAlias != other.keyAlias) return false
+        if (!encryptedKeyIv.contentEquals(other.encryptedKeyIv)) return false
+        if (!encryptedKey.contentEquals(other.encryptedKey)) return false
+
+        return true
+    }
+
+    override fun hashCode(): Int {
+        var result = keyAlias.hashCode()
+        result = 31 * result + encryptedKeyIv.contentHashCode()
+        result = 31 * result + encryptedKey.contentHashCode()
+        return result
+    }
+}
+
+
 class CryptoManager {
     // Static properties, pertain to the class rather than its instances.
     companion object {
@@ -75,23 +103,15 @@ class CryptoManager {
         }
     }
 
-    //TODO: Implement both software and keystore generated keys according to the diagram.
-    private fun retrieveOrCreateKey(keyAlias: String): SecretKey {
-        try {
-            val entry = keyStore.getEntry(keyAlias, null) as? KeyStore.SecretKeyEntry
 
-            return if (entry != null) {
-                entry.secretKey
-            } else {
-                generateHardwareBackedKey(keyAlias)
-            }
-
-        } catch (e: KeyStoreException) {
-            // If the key is invalid (e.g., locked due to authentication), delete it.
-            keyStore.deleteEntry(keyAlias)
-            return generateHardwareBackedKey(keyAlias)
+    private fun retrieveHardwareBackedKey(keyAlias: UUID): SecretKey? {
+        return try {
+            val keyAliasStr = keyAlias.toString()
+            val entry = keyStore.getEntry(keyAliasStr, null) as? KeyStore.SecretKeyEntry
+            entry?.secretKey
         } catch (e: Exception) {
-            throw ErrorRetrievingKeyException("Error retrieving key: \"$keyAlias\"", e)
+            Log.i("retrievingHardwareKey", "Cannot retrieve key: \"$keyAlias\"")
+            return null
         }
     }
 
@@ -103,12 +123,12 @@ class CryptoManager {
     }
 
 
-    private fun generateHardwareBackedKey(keyAlias: String): SecretKey {
+    private fun generateHardwareBackedKey(keyAlias: UUID): SecretKey {
         val keyGenerator = KeyGenerator.getInstance(ALGORITHM, "AndroidKeyStore")
 
         keyGenerator.init(
             KeyGenParameterSpec.Builder(
-                keyAlias,
+                keyAlias.toString(),
                 KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
             )
                 .setBlockModes(BLOCK_MODE)
@@ -133,6 +153,36 @@ class CryptoManager {
     }
 
 
+    private fun extractBiometricMetadata(input: InputStream): BiometricMetadata? {
+        return try {
+            val keyAliasSize = readTwoBytesToInt(input)
+            val encryptedKeyIvSize = readTwoBytesToInt(input)
+            val encryptedKeySize = readTwoBytesToInt(input)
+
+            val keyAliasBytes = ByteArray(keyAliasSize)
+            val encryptedKeyIv = ByteArray(encryptedKeyIvSize)
+            val encryptedKey = ByteArray(encryptedKeySize)
+
+            readFully(input, keyAliasBytes)
+            readFully(input, encryptedKeyIv)
+            readFully(input, encryptedKey)
+
+            val buffer = ByteBuffer.wrap(keyAliasBytes)
+            val keyAlias = UUID(buffer.long, buffer.long)
+
+            BiometricMetadata(
+                keyAlias = keyAlias,
+                encryptedKeyIv = encryptedKeyIv,
+                encryptedKey = encryptedKey
+            )
+        } catch (e: Exception) {
+            Log.i("MetadataExtraction", "Metadata file is either empty or corrupted.")
+            return null
+        }
+    }
+
+
+    // TODO: Wrap in try-catch.
     private fun extractDataFromHeader(input: InputStream): EncryptionHeader {
         val contentCipherIvSize = readTwoBytesToInt(input)
         val keyCipherIvSize = readTwoBytesToInt(input)
@@ -197,6 +247,17 @@ class CryptoManager {
         )
     }
 
+
+    private fun isUuid(str: String): Boolean {
+        return try {
+            UUID.fromString(str)
+            true
+        } catch (e: IllegalArgumentException) {
+            false
+        }
+    }
+
+
     fun encryptStream(
         fileIOStreams: IOStreams,
         metadataIOStreams: IOStreams,
@@ -205,11 +266,13 @@ class CryptoManager {
         return try {
             val unencryptedInputStream = fileIOStreams.input
             val encryptedOutputStream = fileIOStreams.output
+            val metadataInputStream = metadataIOStreams.input
+            val metadataOutputStream = metadataIOStreams.output
 
             val masterKey = generateSoftwareKey()
             val contentCipher = initCipher("ENCRYPT", masterKey)
 
-            if (password == "") {
+            if (password.isBlank()) {
                 throw EmptyPasswordException("The password cannot be empty.")
             }
 
@@ -217,16 +280,51 @@ class CryptoManager {
             val secretKeyForMasterKey = deriveKeyFromPassword(password, passwordSalt)
             val keyCipher = initCipher("ENCRYPT", secretKeyForMasterKey)
 
-            val streamSecretKeyBytes = masterKey.encoded
-                ?: throw IllegalStateException("Idk, the key should've been set by now.")
+            val masterKeyBytes = masterKey.encoded
+                ?: error("Idk, the key should've been set by now.")
 
-            val encryptedStreamSecretKey = keyCipher.doFinal(streamSecretKeyBytes)
+            val encryptedStreamSecretKey = keyCipher.doFinal(masterKeyBytes)
 
-            // TODO: Create, encrypt, and store a hardware-backed key in the metadata file for biometrics.
-            // Read METADATA file if it exists
-            // See if it contains a valid key alias
-            // If it does, read it from the keystore
-            // Otherwise create a new one
+            // TODO: Test if any of this biometric stuff works.
+
+            val biometricMetadata = extractBiometricMetadata(metadataInputStream)
+
+            val keyAliasExists = biometricMetadata != null
+            val biometricSecretKey: SecretKey
+            val keyAlias: UUID
+
+            if (keyAliasExists) {
+                keyAlias = biometricMetadata!!.keyAlias
+                biometricSecretKey = retrieveHardwareBackedKey(keyAlias)
+                    ?: run {
+                        keyStore.deleteEntry(keyAlias.toString())
+                        generateHardwareBackedKey(keyAlias)
+                    }
+            } else {
+                keyAlias = UUID.randomUUID()
+                biometricSecretKey = generateHardwareBackedKey(keyAlias)
+            }
+
+            val biometricCipher = initCipher("ENCRYPT", biometricSecretKey)
+            val biometricallyEncryptedMasterKey = biometricCipher.doFinal(masterKeyBytes)
+
+            val keyAliasSize = 16
+            val keyAliasBytes = ByteBuffer
+                .allocate(keyAliasSize)
+                .putLong(keyAlias.mostSignificantBits)
+                .putLong(keyAlias.leastSignificantBits)
+                .array()
+
+            // Write to the metadata file.
+            // Sizes.
+            metadataOutputStream.write(convertIntToTwoBytes(keyAliasSize))
+            metadataOutputStream.write(convertIntToTwoBytes(biometricCipher.iv.size))
+            metadataOutputStream.write(convertIntToTwoBytes(biometricallyEncryptedMasterKey.size))
+            // Metadata file contents.
+            metadataOutputStream.write(keyAliasBytes)
+            metadataOutputStream.write(biometricCipher.iv)
+            metadataOutputStream.write(biometricallyEncryptedMasterKey)
+
 
             // Create a header.
             // Sizes.
