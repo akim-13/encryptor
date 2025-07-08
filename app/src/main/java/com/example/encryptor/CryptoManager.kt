@@ -258,6 +258,8 @@ class CryptoManager {
     }
 
 
+    // TODO: Consider what happens when you have to encrypt a dir
+    //  using biometrics that's already been encrypted previously.
     fun encryptStream(
         fileIOStreams: IOStreams,
         metadataIOStreams: IOStreams,
@@ -273,7 +275,7 @@ class CryptoManager {
             val contentCipher = initCipher("ENCRYPT", masterKey)
 
             if (password.isBlank()) {
-                throw EmptyPasswordException("The password cannot be empty.")
+                error("Empty password supplied.")
             }
 
             val passwordSalt = generateRandomSalt()
@@ -325,7 +327,6 @@ class CryptoManager {
             metadataOutputStream.write(biometricCipher.iv)
             metadataOutputStream.write(biometricallyEncryptedMasterKey)
 
-
             // Create a header.
             // Sizes.
             encryptedOutputStream.write(convertIntToTwoBytes(contentCipher.iv.size))
@@ -345,9 +346,6 @@ class CryptoManager {
             }
 
             true
-        } catch (e: EmptyPasswordException) {
-            Log.e("EmptyPasswordException", "Empty password supplied.", e)
-            false
         } catch (e: Exception) {
             Log.e("EncryptionError", "Encryption failed.", e)
             false
@@ -357,20 +355,64 @@ class CryptoManager {
 
     fun decryptStream(
         fileIOStreams: IOStreams,
-        password: String,
+        metadataIOStreams: IOStreams? = null,
+        password: String? = null,
         isIntegrityCheck: Boolean = false,
     ): Boolean {
         return try {
             val encryptedInputStream = fileIOStreams.input
             val decryptedOutputStream = fileIOStreams.output
 
-            val encryptionHeader = extractDataFromHeader(encryptedInputStream)
-            val secretKeyForMasterKey = deriveKeyFromPassword(password, encryptionHeader.passwordSalt)
-            val keyCipher = initCipher("DECRYPT", secretKeyForMasterKey, encryptionHeader.keyCipherIv)
-            val masterKeyBytes = keyCipher.doFinal(encryptionHeader.encryptedStreamSecretKey)
-            val masterKey = SecretKeySpec(masterKeyBytes, ALGORITHM)
+            val isBiometricUnlock = metadataIOStreams != null
+            val isPasswordUnlock = password != null
 
-            val streamCipher = initCipher("DECRYPT", masterKey, encryptionHeader.contentCipherIv)
+            if (!isBiometricUnlock && !isPasswordUnlock) {
+                error("Neither password nor biometric data supplied.")
+            }
+
+            var iv: ByteArray? = null
+            var masterKey: SecretKey? = null
+
+            var isBiometricUnlockSuccessful = false
+
+            if (isBiometricUnlock) {
+                try {
+                    val metadataInputStream = metadataIOStreams!!.input
+                    val metadataOutputStream = metadataIOStreams.output
+                    val biometricMetadata = extractBiometricMetadata(metadataInputStream)
+                        ?: error("Invalid biometric metadata supplied.")
+
+                    val biometricKey = retrieveHardwareBackedKey(biometricMetadata.keyAlias)
+                        ?: error(
+                            "Could not retrieve the key " +
+                                    "with alias: \"${biometricMetadata.keyAlias}\"."
+                        )
+
+                    val keyCipher =
+                        initCipher("DECRYPT", biometricKey, biometricMetadata.encryptedKeyIv)
+                    val masterKeyBytes = keyCipher.doFinal(biometricMetadata.encryptedKey)
+
+                    isBiometricUnlockSuccessful = true
+                    iv = biometricMetadata.encryptedKeyIv
+                    masterKey = SecretKeySpec(masterKeyBytes, ALGORITHM)
+                } catch (e: Exception) {
+                    Log.e("Decryption", "Biometric decryption failed", e)
+                }
+            }
+
+            if (isPasswordUnlock && !isBiometricUnlockSuccessful) {
+                val encryptionHeader = extractDataFromHeader(encryptedInputStream)
+                val secretKeyForMasterKey =
+                    deriveKeyFromPassword(password!!, encryptionHeader.passwordSalt)
+                val keyCipher =
+                    initCipher("DECRYPT", secretKeyForMasterKey, encryptionHeader.keyCipherIv)
+                val masterKeyBytes = keyCipher.doFinal(encryptionHeader.encryptedStreamSecretKey)
+
+                iv = encryptionHeader.contentCipherIv
+                masterKey = SecretKeySpec(masterKeyBytes, ALGORITHM)
+            }
+
+            val streamCipher = initCipher("DECRYPT", masterKey!!, iv)
 
             CipherInputStream(encryptedInputStream, streamCipher).use { decryptedInputStream ->
                 if (!isIntegrityCheck) {
@@ -387,7 +429,7 @@ class CryptoManager {
             true
         } catch(e: Exception) {
             if (!isIntegrityCheck) {
-                Log.e("DecryptionError", "Decryption failed!!!", e)
+                Log.e("DecryptionError", "Decryption failed.", e)
             } else {
                 Log.e("IntegrityCheck", "Unexpected failure during integrity verification.", e)
             }
@@ -396,6 +438,3 @@ class CryptoManager {
         }
     }
 }
-
-class ErrorRetrievingKeyException(message: String, cause: Throwable? = null) : Exception(message, cause)
-class EmptyPasswordException(message: String, cause: Throwable? = null) : Exception(message, cause)

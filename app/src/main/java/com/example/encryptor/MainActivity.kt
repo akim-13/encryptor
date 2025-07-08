@@ -187,7 +187,7 @@ fun <R> useIOStreams(
 }
 
 
-fun decryptButtonHandler(dirUri: Uri?, password: String, context: Context) {
+fun decryptButtonHandler(dirUri: Uri?, password: String?, context: Context) {
     dirUri ?: return
     val dir = DocumentFile.fromTreeUri(context, dirUri)
     val encryptedDocumentFile: DocumentFile =
@@ -204,11 +204,29 @@ fun decryptButtonHandler(dirUri: Uri?, password: String, context: Context) {
     val cryptoManager = CryptoManager()
     val inputOutputFileUris = IOFileUris(encryptedDocumentFile.uri, decryptedTarDocumentFile.uri)
 
+
+    // TODO: Create a function (same thing is done in encrypt handler).
+    val selectedRootDir = DocumentFile.fromTreeUri(context, dirUri)
+    val metadataFile = selectedRootDir?.findFile(METADATA_FILENAME)
+        ?: selectedRootDir?.createFile("application/octet-stream", METADATA_FILENAME)
+    val metadataFileUri = metadataFile?.uri
+
+    val isBiometricUnlock = metadataFileUri != null
+
     val isDecryptionSuccessful = useIOStreams(
         inputOutputFileUris,
         context
     ) { fileIOStreams ->
-        cryptoManager.decryptStream(fileIOStreams, password)
+        if (isBiometricUnlock) {
+            useIOStreams(
+                IOFileUris(metadataFileUri!!, metadataFileUri),
+                context
+            ) { metadataIOStreams ->
+                cryptoManager.decryptStream(fileIOStreams, metadataIOStreams, password)
+            }
+        } else {
+            cryptoManager.decryptStream(fileIOStreams, null, password)
+        }
     } ?: false
 
     if (isDecryptionSuccessful) {
@@ -252,6 +270,8 @@ fun encryptButtonHandler(dirUri: Uri?, password: String, context: Context){
         return
     }
 
+    val metadataIOFileUris = IOFileUris(metadataFileUri, metadataFileUri)
+
     val tarFile = createTarFile(dirUri, context, setOf(METADATA_FILENAME)) ?: return  // TODO: Log.e also.
     val encryptedTarFile = File(context.cacheDir, "${tarFile.name}.enc")
     if (encryptedTarFile.exists()) {
@@ -268,13 +288,12 @@ fun encryptButtonHandler(dirUri: Uri?, password: String, context: Context){
         context
     ) { fileIOStreams ->
         useIOStreams(
-            IOFileUris(metadataFileUri, metadataFileUri),
+            metadataIOFileUris,
             context
         ) { metadataIOStreams ->
             cryptoManager.encryptStream(fileIOStreams, metadataIOStreams, password)
         }
     } ?: false
-
 
     if (!isEncryptionSuccessful) {
         // TODO: Let the user know that nothing has been encrypted or changed.
@@ -288,14 +307,17 @@ fun encryptButtonHandler(dirUri: Uri?, password: String, context: Context){
     val dummyFile = File.createTempFile("dummy", ".tmp", context.cacheDir)
     val dummyUri = Uri.fromFile(dummyFile)
 
+    // FIXME: Stopped working after the addition of `metadataIOStreams`.
     val isIntegrityCheckPassed = useIOStreams(
-        IOFileUris(encryptedTarFileUri, dummyUri), context
+        IOFileUris(encryptedTarFileUri, dummyUri),
+        context
     ) { fileIOStreams ->
-        cryptoManager.decryptStream(
-            fileIOStreams,
-            password,
-            true
-        )
+        useIOStreams(
+            metadataIOFileUris,
+            context
+        ) { metadataIOStreams ->
+            cryptoManager.decryptStream(fileIOStreams, metadataIOStreams, password, true)
+        }
     } ?: false
 
     dummyFile.delete()
