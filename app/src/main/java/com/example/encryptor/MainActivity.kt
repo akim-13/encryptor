@@ -238,21 +238,21 @@ fun decryptButtonHandler(dirUri: Uri?, password: String, context: Context) {
 
 }
 
-
+// TODO: Disallow encrypting an already encrypted dir.
 fun encryptButtonHandler(dirUri: Uri?, password: String, context: Context){
     dirUri ?: return
 
     val selectedRootDir = DocumentFile.fromTreeUri(context, dirUri)
     val metadataFile = selectedRootDir?.findFile(METADATA_FILENAME)
-        ?: selectedRootDir?.createFile("text/plain", METADATA_FILENAME)
+        ?: selectedRootDir?.createFile("application/octet-stream", METADATA_FILENAME)
     val metadataFileUri = metadataFile?.uri
 
-   if (metadataFileUri == null) {
-       Log.e("MetadataFile", "Failed to read or create \"${METADATA_FILENAME}\".")
-       return
-   }
+    if (metadataFileUri == null) {
+        Log.e("MetadataFile", "Failed to read or create \"${METADATA_FILENAME}\".")
+        return
+    }
 
-    val tarFile = createTarFile(dirUri, context) ?: return  // TODO: Log.e also.
+    val tarFile = createTarFile(dirUri, context, setOf(METADATA_FILENAME)) ?: return  // TODO: Log.e also.
     val encryptedTarFile = File(context.cacheDir, "${tarFile.name}.enc")
     if (encryptedTarFile.exists()) {
         encryptedTarFile.delete()
@@ -302,7 +302,7 @@ fun encryptButtonHandler(dirUri: Uri?, password: String, context: Context){
 
     if (isIntegrityCheckPassed) {
         Log.i("IntegrityCheck", "Integrity check passed successfully!")
-        deleteAllFilesInDirUri(dirUri, context)
+        deleteAllFilesInDirUri(dirUri, context, setOf(METADATA_FILENAME))
         // TODO: Copy first, delete everything but the encrypted archive afterwards.
         copyFileToDir(encryptedTarFile, dirUri, context)
     } else {
@@ -319,9 +319,12 @@ fun getSelectedDirName(dirUri: Uri?, context: Context): String? {
 }
 
 
-fun deleteAllFilesInDirUri(dirUri: Uri, context: Context) {
+fun deleteAllFilesInDirUri(dirUri: Uri, context: Context, excludedFilenames: Set<String> = emptySet()) {
     val dir = DocumentFile.fromTreeUri(context, dirUri)
     dir?.listFiles()?.forEach { file ->
+        if (file.name in excludedFilenames) {
+            return@forEach
+        }
         file.delete()
     }
 }
@@ -339,13 +342,13 @@ fun copyFileToDir(fileToCopy: File, destDirUri: Uri, context: Context) {
 }
 
 
-fun createTarFile(dirUri: Uri, context: Context): File? {
+fun createTarFile(dirUri: Uri, context: Context, excludedFilenames: Set<String> = emptySet()): File? {
     val rootDir = DocumentFile.fromTreeUri(context, dirUri) ?: return null
     val tarName = getSelectedDirName(dirUri, context)!! + ".tar"
     val tarFile = File(context.filesDir, tarName)
 
     TarArchiveOutputStream(FileOutputStream(tarFile)).use { tarOut ->
-        addDirToTarArchive(rootDir, "", tarOut, context)
+        addDirToTarArchive(rootDir, "", tarOut, context, excludedFilenames)
     }
 
     return tarFile
@@ -353,13 +356,18 @@ fun createTarFile(dirUri: Uri, context: Context): File? {
 
 
 // FIXME: There are potential issues apparently. Ask chat.
+// TODO: Refactor (too many args).
 fun addDirToTarArchive(
     dirToAdd: DocumentFile,
     relativePathPrefix: String,
     tarOut: TarArchiveOutputStream,
-    context: Context
+    context: Context,
+    excludedFilenames: Set<String> = emptySet()
 ) {
     dirToAdd.listFiles().forEach { dirEntry ->
+        if (dirEntry.name in excludedFilenames) {
+            return@forEach
+        }
 
         val tarArchiveEntryName = "$relativePathPrefix${dirEntry.name}"
         val tarArchiveEntry = if (dirEntry.isDirectory) {
