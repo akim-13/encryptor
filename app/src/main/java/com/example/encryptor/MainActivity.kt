@@ -49,8 +49,8 @@ data class IOStreams(
 )
 
 data class IOFileUris(
-    val input: Uri,
-    val output: Uri
+    val input: Uri?,
+    val output: Uri?
 )
 
 
@@ -141,7 +141,7 @@ fun Main() {
 
 
 // <R> defines a generic type parameter.
-fun <R> useIOStreams(
+fun <R> openIOStreamFromUris(
     inputOutputFileUris: IOFileUris,
     context: Context,
     block: (IOStreams) -> R   // Defines a lambda inside { IO -> R }.
@@ -161,8 +161,26 @@ fun <R> useIOStreams(
         }
     }
 
-    val inputStream = openStream(inputUri, true) as? InputStream
-    val outputStream = openStream(outputUri, false) as? OutputStream
+    var dummyInputFile: File? = null
+    var dummyOutputFile: File? = null
+    val dummyInputFileUri: Uri
+    val dummyOutputFileUri: Uri
+
+    val inputStream = if (inputUri != null) {
+        openStream(inputUri, true)
+    } else {
+        dummyInputFile = File.createTempFile("inputDummy", ".tmp", context.cacheDir)
+        dummyInputFileUri = Uri.fromFile(dummyInputFile)
+        openStream(dummyInputFileUri, true)
+    } as? InputStream
+
+    val outputStream = if (outputUri != null) {
+        openStream(outputUri, false)
+    } else {
+        dummyOutputFile = File.createTempFile("outputDummy", ".tmp", context.cacheDir)
+        dummyOutputFileUri = Uri.fromFile(dummyOutputFile)
+        openStream(dummyOutputFileUri, false)
+    } as? OutputStream
 
     if (inputStream == null || outputStream == null) {
         try {
@@ -183,6 +201,9 @@ fun <R> useIOStreams(
     } catch (e: Exception) {
         Log.e("IOStreamError", "Error during IO operations", e)
         null
+    } finally {
+        dummyInputFile?.delete()
+        dummyOutputFile?.delete()
     }
 }
 
@@ -213,12 +234,12 @@ fun decryptButtonHandler(dirUri: Uri?, password: String?, context: Context) {
 
     val isBiometricUnlock = metadataFileUri != null
 
-    val isDecryptionSuccessful = useIOStreams(
+    val isDecryptionSuccessful = openIOStreamFromUris(
         inputOutputFileUris,
         context
     ) { fileIOStreams ->
         if (isBiometricUnlock) {
-            useIOStreams(
+            openIOStreamFromUris(
                 IOFileUris(metadataFileUri!!, metadataFileUri),
                 context
             ) { metadataIOStreams ->
@@ -270,8 +291,6 @@ fun encryptButtonHandler(dirUri: Uri?, password: String, context: Context){
         return
     }
 
-    val metadataIOFileUris = IOFileUris(metadataFileUri, metadataFileUri)
-
     val tarFile = createTarFile(dirUri, context, setOf(METADATA_FILENAME)) ?: return  // TODO: Log.e also.
     val encryptedTarFile = File(context.cacheDir, "${tarFile.name}.enc")
     if (encryptedTarFile.exists()) {
@@ -283,12 +302,12 @@ fun encryptButtonHandler(dirUri: Uri?, password: String, context: Context){
     val tarFileUri = Uri.fromFile(tarFile)
     val encryptedTarFileUri = Uri.fromFile(encryptedTarFile)
 
-    val isEncryptionSuccessful = useIOStreams(
+    val isEncryptionSuccessful = openIOStreamFromUris(
         IOFileUris(tarFileUri, encryptedTarFileUri),
         context
     ) { fileIOStreams ->
-        useIOStreams(
-            metadataIOFileUris,
+        openIOStreamFromUris(
+            IOFileUris(metadataFileUri, metadataFileUri),
             context
         ) { metadataIOStreams ->
             cryptoManager.encryptStream(fileIOStreams, metadataIOStreams, password)
@@ -303,24 +322,17 @@ fun encryptButtonHandler(dirUri: Uri?, password: String, context: Context){
 
     Log.i("Encryption", "Encrypted successfully!")
 
-    // Needed to open an output stream. It's never actually used.
-    val dummyFile = File.createTempFile("dummy", ".tmp", context.cacheDir)
-    val dummyUri = Uri.fromFile(dummyFile)
-
-    // FIXME: Stopped working after the addition of `metadataIOStreams`.
-    val isIntegrityCheckPassed = useIOStreams(
-        IOFileUris(encryptedTarFileUri, dummyUri),
+    val isIntegrityCheckPassed = openIOStreamFromUris(
+        IOFileUris(encryptedTarFileUri, null),
         context
     ) { fileIOStreams ->
-        useIOStreams(
-            metadataIOFileUris,
+        openIOStreamFromUris(
+            IOFileUris(metadataFileUri, null),
             context
         ) { metadataIOStreams ->
             cryptoManager.decryptStream(fileIOStreams, metadataIOStreams, password, true)
         }
     } ?: false
-
-    dummyFile.delete()
 
     if (isIntegrityCheckPassed) {
         Log.i("IntegrityCheck", "Integrity check passed successfully!")

@@ -247,18 +247,8 @@ class CryptoManager {
     }
 
 
-    private fun isUuid(str: String): Boolean {
-        return try {
-            UUID.fromString(str)
-            true
-        } catch (e: IllegalArgumentException) {
-            false
-        }
-    }
-
-
     // TODO: Consider what happens when you have to encrypt a dir
-    //  using biometrics that's already been encrypted previously.
+    //       that's already been encrypted previously using biometrics.
     fun encryptStream(
         fileIOStreams: IOStreams,
         metadataIOStreams: IOStreams,
@@ -285,8 +275,6 @@ class CryptoManager {
                 ?: error("Idk, the key should've been set by now.")
 
             val encryptedStreamSecretKey = keyCipher.doFinal(masterKeyBytes)
-
-            // TODO: Test if any of this biometric stuff works.
 
             val biometricMetadata = extractBiometricMetadata(metadataInputStream)
 
@@ -377,8 +365,6 @@ class CryptoManager {
             if (isBiometricUnlock) {
                 try {
                     val metadataInputStream = metadataIOStreams!!.input
-                    // TODO: Do not pass metadataOutputStream to decrypt at all, pass a dummy file.
-                    val metadataOutputStream = metadataIOStreams.output
                     val biometricMetadata = extractBiometricMetadata(metadataInputStream)
                         ?: error("Invalid biometric metadata supplied.")
 
