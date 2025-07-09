@@ -5,7 +5,9 @@ import android.security.keystore.KeyProperties
 import android.util.Log
 import com.example.encryptor.io.IOStreams
 import java.io.EOFException
+import java.io.FileOutputStream
 import java.io.InputStream
+import java.io.OutputStream
 import java.nio.ByteBuffer
 import java.security.KeyStore
 import java.security.SecureRandom
@@ -194,21 +196,36 @@ class CryptoManager {
     }
 
 
-    fun encryptBytesUsingPassword(bytes: ByteArray, password: String): ByteArray? {
+    fun encryptBytesUsingPassword(bytes: ByteArray, password: String): PasswordEncryptionResult? {
         return try {
             if (password.isBlank()) {
                 error("Empty password supplied.")
             }
 
-            // FIXME: These are needed in encryptStream().
             val passwordSalt = generateRandomSalt()
             val passwordDerivedSecretKey = deriveKeyFromPassword(password, passwordSalt)
             val keyCipher = initCipher("ENCRYPT", passwordDerivedSecretKey)
 
-            keyCipher.doFinal(bytes)
+            PasswordEncryptionResult(
+                encryptedBytes = keyCipher.doFinal(bytes),
+                iv = keyCipher.iv,
+                passwordSalt = passwordSalt,
+            )
         } catch (e: Exception) {
             Log.e("PasswordEncryption", "Failed to encrypt the given bytes with the password.")
             null
+        }
+    }
+
+
+    fun writeByteArraysWithSizes(arrays: List<ByteArray>, outputStream: OutputStream): Boolean {
+        return try {
+            arrays.forEach { outputStream.write(it.size) }
+            arrays.forEach { outputStream.write(it) }
+            true
+        } catch (e: Exception) {
+            Log.e("WritingBytesWithSizes", "Failed to write bytes to outputStream.")
+            false
         }
     }
 
@@ -229,8 +246,10 @@ class CryptoManager {
             val masterKey = generateSoftwareKey()
             val masterKeyBytes = masterKey.encoded
 
-            val passwordEncryptedMasterKeyBytes = encryptBytesUsingPassword(masterKeyBytes, password)
-                ?: error("Failed to encrypt the master key using password.")
+            val passwordEncryptionResult = encryptBytesUsingPassword(
+                masterKeyBytes,
+                password,
+            ) ?: error("Failed to encrypt the master key using password.")
 
             // TODO: Continue refactoring here.
             val biometricMetadata = extractBiometricMetadata(metadataInputStream)
@@ -274,17 +293,31 @@ class CryptoManager {
 
             val contentCipher = initCipher("ENCRYPT", masterKey)
 
+            val encryptionHeader = EncryptionHeader(
+                contentCipherIv = contentCipher.iv,
+                masterKeyPasswordCipherIv = passwordEncryptionResult.iv,
+                passwordSalt = passwordEncryptionResult.passwordSalt,
+                passwordEncryptedMasterKey = passwordEncryptionResult.encryptedBytes
+            )
+
+            val encryptionHeaderOrderedFields = listOf<ByteArray>(
+                encryptionHeader.contentCipherIv,
+                encryptionHeader.masterKeyPasswordCipherIv,
+                encryptionHeader.passwordSalt,
+                encryptionHeader.passwordEncryptedMasterKey
+            )
+
             // Create a header.
             // Sizes (the number of bytes).
-            encryptedOutputStream.write(convertIntToTwoBytes(contentCipher.iv.size))
-            encryptedOutputStream.write(convertIntToTwoBytes(keyCipher.iv.size))
-            encryptedOutputStream.write(convertIntToTwoBytes(passwordSalt.size))
-            encryptedOutputStream.write(convertIntToTwoBytes(passwordEncryptedMasterKeyBytes.size))
+            encryptedOutputStream.write(convertIntToTwoBytes(encryptionHeader.contentCipherIv.size))
+            encryptedOutputStream.write(convertIntToTwoBytes(encryptionHeader.masterKeyPasswordCipherIv.size))
+            encryptedOutputStream.write(convertIntToTwoBytes(encryptionHeader.passwordSalt.size))
+            encryptedOutputStream.write(convertIntToTwoBytes(encryptionHeader.passwordEncryptedMasterKey.size))
             // Header contents.
-            encryptedOutputStream.write(contentCipher.iv)
-            encryptedOutputStream.write(keyCipher.iv)
-            encryptedOutputStream.write(passwordSalt)
-            encryptedOutputStream.write(passwordEncryptedMasterKeyBytes)
+            encryptedOutputStream.write(encryptionHeader.contentCipherIv)
+            encryptedOutputStream.write(encryptionHeader.masterKeyPasswordCipherIv)
+            encryptedOutputStream.write(encryptionHeader.passwordSalt)
+            encryptedOutputStream.write(encryptionHeader.passwordEncryptedMasterKey)
 
             // Encrypt main content.
             CipherInputStream(unencryptedInputStream, contentCipher).use { encryptedInputStream ->
