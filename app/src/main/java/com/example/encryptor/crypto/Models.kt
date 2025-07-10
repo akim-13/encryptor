@@ -1,6 +1,7 @@
 package com.example.encryptor.crypto
 
-import java.util.UUID
+import com.example.encryptor.util.BYTES_FOR_SIZE_FIELD_IN_HEADER
+import kotlin.reflect.KProperty1
 
 data class EncryptionHeader(
     val contentCipherIv: ByteArray,
@@ -34,7 +35,7 @@ data class EncryptionHeader(
 
 
 data class BiometricMetadata (
-    val keyAlias: UUID,
+    val keyAliasStringBytes: ByteArray,
     val masterKeyBiometricCipherIv: ByteArray,
     val biometricallyEncryptedMasterKey: ByteArray
 ) {
@@ -44,7 +45,7 @@ data class BiometricMetadata (
 
         other as BiometricMetadata
 
-        if (keyAlias != other.keyAlias) return false
+        if (!keyAliasStringBytes.contentEquals(other.keyAliasStringBytes)) return false
         if (!masterKeyBiometricCipherIv.contentEquals(other.masterKeyBiometricCipherIv)) return false
         if (!biometricallyEncryptedMasterKey.contentEquals(other.biometricallyEncryptedMasterKey)) return false
 
@@ -52,7 +53,7 @@ data class BiometricMetadata (
     }
 
     override fun hashCode(): Int {
-        var result = keyAlias.hashCode()
+        var result = keyAliasStringBytes.hashCode()
         result = 31 * result + masterKeyBiometricCipherIv.contentHashCode()
         result = 31 * result + biometricallyEncryptedMasterKey.contentHashCode()
         return result
@@ -85,3 +86,16 @@ data class PasswordEncryptionResult (
         return result
     }
 }
+
+
+data class HeaderField(
+    // I.e. `property` is a reference to a property of EncryptionHeader whose value is a ByteArray.
+    val property: KProperty1<EncryptionHeader, ByteArray>,
+    val bytesForSizeField: Int = BYTES_FOR_SIZE_FIELD_IN_HEADER
+)
+
+
+data class MetadataField(
+    val property: KProperty1<BiometricMetadata, ByteArray>,
+    val bytesForSizeField: Int = BYTES_FOR_SIZE_FIELD_IN_HEADER
+)
