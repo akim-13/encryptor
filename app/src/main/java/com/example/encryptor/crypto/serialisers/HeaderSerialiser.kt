@@ -3,7 +3,7 @@ package com.example.encryptor.crypto.serialisers
 import android.util.Log
 import com.example.encryptor.crypto.BlockIOUtils.readBinaryBlocksWithSizes
 import com.example.encryptor.crypto.BlockIOUtils.writeBinaryBlocksWithSizes
-import com.example.encryptor.crypto.EncryptionHeader
+import com.example.encryptor.crypto.models.EncryptionHeader
 import com.example.encryptor.util.BYTES_FOR_SIZE_FIELD_IN_HEADER
 import com.example.encryptor.util.ENCRYPTION_HEADER_FIELDS
 import java.io.InputStream

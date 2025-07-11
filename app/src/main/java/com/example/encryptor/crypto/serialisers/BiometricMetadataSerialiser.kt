@@ -1,7 +1,7 @@
 package com.example.encryptor.crypto.serialisers
 
 import android.util.Log
-import com.example.encryptor.crypto.BiometricMetadata
+import com.example.encryptor.crypto.models.BiometricMetadata
 import com.example.encryptor.crypto.BlockIOUtils.readBinaryBlocksWithSizes
 import com.example.encryptor.crypto.BlockIOUtils.writeBinaryBlocksWithSizes
 import com.example.encryptor.util.BIOMETRIC_METADATA_FIELDS

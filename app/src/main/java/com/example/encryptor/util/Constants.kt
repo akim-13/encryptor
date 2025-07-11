@@ -1,9 +1,9 @@
 package com.example.encryptor.util
 
-import com.example.encryptor.crypto.BiometricMetadata
-import com.example.encryptor.crypto.EncryptionHeader
-import com.example.encryptor.crypto.HeaderField
-import com.example.encryptor.crypto.MetadataField
+import com.example.encryptor.crypto.models.BiometricMetadata
+import com.example.encryptor.crypto.models.EncryptionHeader
+import com.example.encryptor.crypto.models.HeaderField
+import com.example.encryptor.crypto.models.MetadataField
 
 const val BYTES_FOR_SIZE_FIELD_IN_HEADER = 2
 val ENCRYPTION_HEADER_FIELDS = listOf(

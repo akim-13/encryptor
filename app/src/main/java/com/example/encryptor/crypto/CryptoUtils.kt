@@ -2,6 +2,8 @@ package com.example.encryptor.crypto
 
 import android.security.keystore.KeyProperties
 import android.util.Log
+import com.example.encryptor.crypto.models.EncryptionHeader
+import com.example.encryptor.crypto.models.PasswordEncryptionResult
 import java.security.SecureRandom
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator

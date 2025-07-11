@@ -4,6 +4,7 @@ import android.util.Log
 import com.example.encryptor.crypto.serialisers.BiometricMetadataSerialiser.readBiometricMetadata
 import com.example.encryptor.crypto.serialisers.BiometricMetadataSerialiser.writeBiometricMetadata
 import com.example.encryptor.crypto.CryptoUtils.initCipher
+import com.example.encryptor.crypto.models.BiometricMetadata
 import com.example.encryptor.io.IOStreams
 import com.example.encryptor.util.ENCRYPTOR_CHARSET
 import java.io.InputStream

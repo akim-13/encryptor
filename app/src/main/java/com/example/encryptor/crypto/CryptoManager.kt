@@ -6,6 +6,7 @@ import com.example.encryptor.crypto.CryptoUtils.decryptMasterKeyBytesUsingPasswo
 import com.example.encryptor.crypto.CryptoUtils.encryptBytesUsingPassword
 import com.example.encryptor.crypto.CryptoUtils.generateSoftwareKey
 import com.example.encryptor.crypto.CryptoUtils.initCipher
+import com.example.encryptor.crypto.models.EncryptionHeader
 import com.example.encryptor.crypto.serialisers.HeaderSerialiser.readEncryptionHeader
 import com.example.encryptor.crypto.serialisers.HeaderSerialiser.writeEncryptionHeader
 import com.example.encryptor.io.IOStreams
