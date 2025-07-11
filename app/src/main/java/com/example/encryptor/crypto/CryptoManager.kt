@@ -90,6 +90,115 @@ class CryptoManager {
     }
 
 
+    private fun readBinaryBlocksWithSizes(
+        input: InputStream,
+        fieldCount: Int,
+        sizeFieldBytes: Int
+    ): List<ByteArray> {
+        val blocks = mutableListOf<ByteArray>()
+
+        repeat(fieldCount) {
+            val sizeBytes = ByteArray(sizeFieldBytes)
+            readFully(input, sizeBytes)
+
+            val size = ByteBuffer
+                .wrap(ByteArray(Int.SIZE_BYTES).apply {
+                    // Copy sizeBytes into the rightmost part of 4-byte int array.
+                    System.arraycopy(
+                        sizeBytes,
+                        0,
+                        this,
+                        Int.SIZE_BYTES - sizeFieldBytes,
+                        sizeFieldBytes
+                    )
+                })
+                .int
+
+            val block = ByteArray(size)
+            readFully(input, block)
+
+            blocks.add(block)
+        }
+
+        return blocks
+    }
+
+
+    fun extractDataFromHeader(input: InputStream): EncryptionHeader? {
+        return try {
+            // Example result:
+            // headerFieldValues = [
+            //     contentCipherIv bytes,
+            //     masterKeyPasswordCipherIv bytes,
+            //     passwordSalt bytes,
+            //     passwordEncryptedMasterKey bytes
+            // ]
+            val headerFieldValues = readBinaryBlocksWithSizes(
+                input,
+                ENCRYPTION_HEADER_FIELDS.size,
+                BYTES_FOR_SIZE_FIELD_IN_HEADER
+            )
+
+            // Example result:
+            // fieldMap = {
+            //   EncryptionHeader::contentCipherIv → blocks[0],
+            //   EncryptionHeader::masterKeyPasswordCipherIv → blocks[1],
+            //   EncryptionHeader::passwordSalt → blocks[2],
+            //   EncryptionHeader::passwordEncryptedMasterKey → blocks[3]
+            // }
+            val fieldMap = ENCRYPTION_HEADER_FIELDS
+                .mapIndexed { index, field -> field.property to headerFieldValues[index] }
+                .toMap()
+
+            EncryptionHeader(
+                contentCipherIv = fieldMap.getValue(EncryptionHeader::contentCipherIv),
+                masterKeyPasswordCipherIv = fieldMap.getValue(EncryptionHeader::masterKeyPasswordCipherIv),
+                passwordSalt = fieldMap.getValue(EncryptionHeader::passwordSalt),
+                passwordEncryptedMasterKey = fieldMap.getValue(EncryptionHeader::passwordEncryptedMasterKey)
+            )
+        } catch (e: Exception) {
+            Log.e("HeaderExtraction", "Failed to extract data from the header.", e)
+            null
+        }
+    }
+
+
+    fun extractBiometricMetadata(input: InputStream): BiometricMetadata? {
+        return try {
+            // Example result:
+            // metadataFieldValues = [
+            //     keyAliasStringBytes bytes,
+            //     masterKeyBiometricCipherIv bytes,
+            //     biometricallyEncryptedMasterKey bytes
+            // ]
+            val metadataFieldValues = readBinaryBlocksWithSizes(
+                input,
+                BIOMETRIC_METADATA_FIELDS.size,
+                BYTES_FOR_SIZE_FIELD_IN_METADATA
+            )
+
+            // Example result:
+            // fieldMap = {
+            //   BiometricMetadata::keyAliasStringBytes → blocks[0],
+            //   BiometricMetadata::masterKeyBiometricCipherIv → blocks[1],
+            //   BiometricMetadata::biometricallyEncryptedMasterKey → blocks[2]
+            // }
+            val fieldMap = BIOMETRIC_METADATA_FIELDS
+                .mapIndexed { index, field -> field.property to metadataFieldValues[index] }
+                .toMap()
+
+            BiometricMetadata(
+                keyAliasStringBytes = fieldMap.getValue(BiometricMetadata::keyAliasStringBytes),
+                masterKeyBiometricCipherIv = fieldMap.getValue(BiometricMetadata::masterKeyBiometricCipherIv),
+                biometricallyEncryptedMasterKey = fieldMap.getValue(BiometricMetadata::biometricallyEncryptedMasterKey)
+            )
+        } catch (e: Exception) {
+            Log.i("MetadataExtraction", "Metadata file is either empty or corrupted.", e)
+            null
+        }
+    }
+
+
     private fun readFully(input: InputStream, buffer: ByteArray) {
         var bytesRead = 0
         while (bytesRead < buffer.size) {
@@ -98,62 +207,6 @@ class CryptoManager {
                 throw EOFException("Unexpected end of stream while reading header data.")
             }
             bytesRead += read
-        }
-    }
-
-
-    private fun extractBiometricMetadata(input: InputStream): BiometricMetadata? {
-        return try {
-            val keyAliasSize = readTwoBytesToInt(input)
-            val encryptedKeyIvSize = readTwoBytesToInt(input)
-            val encryptedKeySize = readTwoBytesToInt(input)
-
-            val keyAliasBytes = ByteArray(keyAliasSize)
-            val encryptedKeyIv = ByteArray(encryptedKeyIvSize)
-            val encryptedKey = ByteArray(encryptedKeySize)
-
-            readFully(input, keyAliasBytes)
-            readFully(input, encryptedKeyIv)
-            readFully(input, encryptedKey)
-
-            BiometricMetadata(
-                keyAliasStringBytes = keyAliasBytes,
-                masterKeyBiometricCipherIv = encryptedKeyIv,
-                biometricallyEncryptedMasterKey = encryptedKey
-            )
-        } catch (e: Exception) {
-            Log.i("MetadataExtraction", "Metadata file is either empty or corrupted.")
-            null
-        }
-    }
-
-
-    private fun extractDataFromHeader(input: InputStream): EncryptionHeader? {
-        return try {
-            val contentCipherIvSize = readTwoBytesToInt(input)
-            val keyCipherIvSize = readTwoBytesToInt(input)
-            val passwordSaltSize = readTwoBytesToInt(input)
-            val encryptedStreamSecretKeySize = readTwoBytesToInt(input)
-
-            val contentCipherIv = ByteArray(contentCipherIvSize)
-            val keyCipherIv = ByteArray(keyCipherIvSize)
-            val passwordSalt = ByteArray(passwordSaltSize)
-            val encryptedStreamSecretKey = ByteArray(encryptedStreamSecretKeySize)
-
-            readFully(input, contentCipherIv)
-            readFully(input, keyCipherIv)
-            readFully(input, passwordSalt)
-            readFully(input, encryptedStreamSecretKey)
-
-            EncryptionHeader(
-                contentCipherIv = contentCipherIv,
-                masterKeyPasswordCipherIv = keyCipherIv,
-                passwordSalt = passwordSalt,
-                passwordEncryptedMasterKey = encryptedStreamSecretKey
-            )
-        } catch (e: Exception) {
-            Log.e("HeaderExtraction", "Failed to extract data from the header.")
-            null
         }
     }
 
@@ -175,18 +228,6 @@ class CryptoManager {
         val salt = ByteArray(size)
         SecureRandom().nextBytes(salt)
         return salt
-    }
-
-
-    private fun readTwoBytesToInt(input: InputStream): Int {
-        val leftByte = input.read()
-        val rightByte = input.read()
-
-        if (leftByte == -1 || rightByte == -1) {
-            throw EOFException("Unexpected end of stream while reading 2-byte integer")
-        }
-
-        return (leftByte shl 8) or rightByte
     }
 
 
@@ -265,6 +306,7 @@ class CryptoManager {
         }
     }
 
+
     private fun writeBinaryBlocksWithSizes(
         blocks: List<ByteArray>,
         outputStream: OutputStream,
@@ -285,27 +327,25 @@ class CryptoManager {
     }
 
 
-    fun validateAndGenerateNewMetadataIfNeeded(existingBiometricMetadata: BiometricMetadata?, masterKeyBytes: ByteArray): BiometricMetadata? {
-        if (existingBiometricMetadata != null) {
-            val keyAliasStringBytes = existingBiometricMetadata.keyAliasStringBytes
-            val biometricSecretKey = retrieveHardwareBackedKey(keyAliasStringBytes)
+    fun generateNewMetadata(
+        existingBiometricMetadata: BiometricMetadata?,
+        masterKeyBytes: ByteArray
+    ): BiometricMetadata {
+        val keyAliasStringBytes = existingBiometricMetadata?.keyAliasStringBytes
+            ?: UUID.randomUUID().toString().toByteArray(ENCRYPTOR_CHARSET)
 
-            if (biometricSecretKey != null) {
-                return null
+        val biometricSecretKey = retrieveHardwareBackedKey(keyAliasStringBytes)
+            ?: run {
+                // Clean up just in case the key exists but is invalid (e.g. locked out).
+                keyStore.deleteEntry(keyAliasStringBytes.toString(ENCRYPTOR_CHARSET))
+                generateHardwareBackedKey(keyAliasStringBytes)
             }
 
-            // The key alias exists, but something is wrong with the stored key, so clean up.
-            keyStore.deleteEntry(keyAliasStringBytes.toString(ENCRYPTOR_CHARSET))
-        }
-
-        val newKeyAliasStringBytes = UUID.randomUUID().toString().toByteArray(ENCRYPTOR_CHARSET)
-        val newBiometricSecretKey = generateHardwareBackedKey(newKeyAliasStringBytes)
-
-        val biometricCipher = initCipher("ENCRYPT", newBiometricSecretKey)
+        val biometricCipher = initCipher("ENCRYPT", biometricSecretKey)
         val biometricallyEncryptedMasterKey = biometricCipher.doFinal(masterKeyBytes)
 
         return BiometricMetadata(
-            keyAliasStringBytes = newKeyAliasStringBytes,
+            keyAliasStringBytes = keyAliasStringBytes,
             masterKeyBiometricCipherIv = biometricCipher.iv,
             biometricallyEncryptedMasterKey = biometricallyEncryptedMasterKey,
         )
@@ -315,12 +355,9 @@ class CryptoManager {
     fun handleMetadata(metadataIOStreams: IOStreams, masterKeyBytes: ByteArray): Boolean {
         return try {
             val existingBiometricMetadata = extractBiometricMetadata(metadataIOStreams.input)
-            val newBiometricMetadata =
-                validateAndGenerateNewMetadataIfNeeded(existingBiometricMetadata, masterKeyBytes)
+            val newBiometricMetadata = generateNewMetadata(existingBiometricMetadata, masterKeyBytes)
 
-            if (newBiometricMetadata != null) {
-                writeBiometricMetadata(newBiometricMetadata, metadataIOStreams.output)
-            }
+            writeBiometricMetadata(newBiometricMetadata, metadataIOStreams.output)
 
             true
         } catch (e: Exception) {
@@ -338,14 +375,12 @@ class CryptoManager {
         password: String,  // TODO: Make `String?`. See TODO above.
     ): Boolean {
         return try {
-            val unencryptedInputStream = fileIOStreams.input
-            val encryptedOutputStream = fileIOStreams.output
-
             val masterKey = generateSoftwareKey()
             val masterKeyBytes = masterKey.encoded
 
-            if (!handleMetadata(metadataIOStreams, masterKeyBytes)) {
-                Log.e("Encryption", "Failed to deal with biometrics.")
+            val biometricEncryptionSuccessful = handleMetadata(metadataIOStreams, masterKeyBytes)
+            if (!biometricEncryptionSuccessful) {
+                Log.e("Encryption", "Failed to encrypt the master key biometrically.")
             }
 
             val passwordEncryptionResult = encryptBytesUsingPassword(
@@ -362,7 +397,10 @@ class CryptoManager {
                 passwordEncryptedMasterKey = passwordEncryptionResult.encryptedBytes
             )
 
-            writeEncryptionHeader(encryptionHeader, encryptedOutputStream)
+            writeEncryptionHeader(encryptionHeader, fileIOStreams.output)
+
+            val unencryptedInputStream = fileIOStreams.input
+            val encryptedOutputStream = fileIOStreams.output
 
             // Encrypt main content.
             CipherInputStream(unencryptedInputStream, contentCipher).use { encryptedInputStream ->
@@ -397,6 +435,7 @@ class CryptoManager {
         }
     }
 
+
     fun decryptMasterKeyBytesUsingPassword(encryptionHeader: EncryptionHeader, password: String): ByteArray? {
         return try {
             val secretKeyForMasterKey =
@@ -411,6 +450,7 @@ class CryptoManager {
             null
         }
     }
+
 
     fun decryptMasterKey(metadataIOStreams: IOStreams?, password: String?, encryptionHeader: EncryptionHeader): SecretKey {
         val isBiometricUnlock = metadataIOStreams != null
@@ -434,6 +474,7 @@ class CryptoManager {
 
         return SecretKeySpec(masterKeyBytes, ALGORITHM)
     }
+
 
     fun decryptStream(
         fileIOStreams: IOStreams,
